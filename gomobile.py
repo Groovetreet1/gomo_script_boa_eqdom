@@ -1099,7 +1099,6 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             try:
                 out_prefix = infer_out_prefix_from_call_filename(f.name)
                 call_by_prefix[out_prefix] = load_call_records(f)
-                st.success(f"✅ {f.name} → camp. {out_prefix} ({len(call_by_prefix[out_prefix])} appels)")
             except Exception as e:
                 st.error(f"❌ Erreur lecture {f.name} : {e}")
 
@@ -1116,9 +1115,7 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         else:
             st.warning(f"⚠️ Campagne {prefix} : manque OUT_SVI ou OUT_REPORT, ignorée.")
 
-    st.markdown(f"**Campagnes appariées : {len(ready)}**")
-    for c in ready:
-        st.markdown(f"- `{c['prefix']}` : {len(c['calls'])} appels chargés")
+    st.caption(f"**{len(ready)}** campagne(s) appariée(s) · {sum(len(c['calls']) for c in ready)} appels chargés")
 
     # ── Étape 3 : Lancement ──
     if st.button("🚀 Lancer la génération batch", disabled=not ready, key="boa_batch_run"):

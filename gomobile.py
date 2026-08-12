@@ -634,185 +634,6 @@ def app_avt_to_apt():
     )
 
 
-# ==============================
-# 3) APP Correcteur de Numéros
-#    (fichier WS_MRKG_APP.py)
-# ==============================
-
-def add_zero_prefix(phone_number):
-    """Ajoute un 0 au début des numéros de téléphone si nécessaire"""
-    if pd.isna(phone_number):
-        return phone_number
-
-    phone_str = str(int(phone_number)) if isinstance(phone_number, float) else str(phone_number)
-
-    # Nettoyer le numéro (enlever les espaces, etc.)
-    phone_str = ''.join(filter(str.isdigit, phone_str))
-
-    # Vérifier si le numéro ne commence pas déjà par 0 et a 9 chiffres
-    if not phone_str.startswith('0') and len(phone_str) == 9:
-        return '0' + phone_str
-    elif len(phone_str) == 10 and phone_str.startswith('0'):
-        return phone_str  # Déjà correct
-    else:
-        return phone_str  # Retourner tel quel si format non reconnu
-
-
-def process_file(uploaded_file):
-    """Traite un fichier uploadé"""
-    try:
-        # Lire le fichier Excel
-        df = pd.read_excel(uploaded_file)
-
-        # Vérifier si la colonne 'telephone' existe
-        if 'telephone' not in df.columns:
-            return None, f"❌ Colonne 'telephone' non trouvée dans {uploaded_file.name}"
-
-        # Sauvegarder le nombre de lignes avant traitement
-        original_rows = len(df)
-
-        # Appliquer la transformation
-        df['telephone'] = df['telephone'].apply(add_zero_prefix)
-
-        # Compter les numéros modifiés (ce compteur suit la logique existante)
-        modified_count = len(df[df['telephone'].astype(str).str.startswith('0')])
-
-        # Créer un fichier en mémoire pour le téléchargement
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Feuille1')
-
-        output.seek(0)
-
-        return output, {
-            'filename': uploaded_file.name,
-            'modified_count': modified_count,
-            'total_rows': original_rows,
-            'df': df
-        }
-
-    except Exception as e:
-        return None, f"❌ Erreur avec {uploaded_file.name}: {str(e)}"
-
-
-def app_correcteur_telephone():
-    st.title("📱 Correcteur de Numéros de Téléphone Pour WS MRKG")
-    st.markdown("""
-    Cette application ajoute automatiquement un **0** au début des numéros de téléphone 
-    dans vos fichiers Excel.
-    """)
-
-    # Upload de fichiers multiples
-    uploaded_files = st.file_uploader(
-        "Choisissez vos fichiers Excel",
-        type=['xlsx', 'xls'],
-        accept_multiple_files=True,
-        help="Vous pouvez sélectionner plusieurs fichiers à la fois",
-        key="ws_files"
-    )
-
-    if uploaded_files:
-        st.success(f"📂 {len(uploaded_files)} fichier(s) chargé(s)")
-
-        # Bouton pour traiter tous les fichiers
-        if st.button("🚀 Traiter tous les fichiers", type="primary", key="ws_run"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            results = []
-            errors = []
-
-            for i, uploaded_file in enumerate(uploaded_files):
-                # Mettre à jour la progression
-                progress = (i + 1) / len(uploaded_files)
-                progress_bar.progress(progress)
-                status_text.text(f"Traitement de {uploaded_file.name}...")
-
-                # Traiter le fichier
-                output, result = process_file(uploaded_file)
-
-                if output:
-                    results.append((output, result))
-                else:
-                    errors.append(result)
-
-            progress_bar.empty()
-            status_text.empty()
-
-            # Afficher les résultats
-            if results:
-                st.success("✅ Traitement terminé !")
-
-                # Section de téléchargement
-                st.subheader("📥 Télécharger les fichiers corrigés")
-
-                for output, result in results:
-                    filename = result['filename']
-                    base_name = os.path.splitext(filename)[0]
-                    new_filename = f"{base_name}_corrige.xlsx"
-
-                    col1, col2, col3 = st.columns([3, 1, 1])
-
-                    with col1:
-                        st.write(f"**{filename}**")
-
-                    with col2:
-                        st.download_button(
-                            label="📥 Télécharger",
-                            data=output.getvalue(),
-                            file_name=new_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"download_{filename}"
-                        )
-
-                    with col3:
-                        st.info(f"{result['modified_count']}/{result['total_rows']} modifiés")
-
-                # Aperçu des données
-                st.subheader("👀 Aperçu des données corrigées")
-
-                # Sélecteur de fichier pour l'aperçu
-                file_options = {r['filename']: r for _, r in results}
-                selected_file = st.selectbox(
-                    "Choisir un fichier pour l'aperçu",
-                    options=list(file_options.keys()),
-                    key="ws_preview_choice"
-                )
-
-                if selected_file:
-                    selected_result = file_options[selected_file]
-                    st.caption(f"Aperçu des 10 premières lignes de {selected_file}")
-                    st.dataframe(
-                        selected_result['df'].head(10),
-                        width='stretch'
-                    )
-
-            # Afficher les erreurs
-            if errors:
-                st.error("❌ Des erreurs sont survenues :")
-                for error in errors:
-                    st.write(error)
-
-        # Aperçu des fichiers uploadés
-        st.subheader("📋 Fichiers chargés")
-        for uploaded_file in uploaded_files:
-            st.write(f"• {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
-
-    else:
-        # Instructions
-        st.info("""
-        ### 📝 Instructions :
-        1. **Uploader** vos fichiers Excel contenant une colonne 'telephone'
-        2. **Cliquer** sur le bouton "Traiter tous les fichiers"
-        3. **Télécharger** les fichiers corrigés
-        
-        ### 🔧 Fonctionnalités :
-        - Support multiple fichiers
-        - Ajout automatique du préfixe 0
-        - Aperçu des données corrigées
-        - Téléchargement individuel
-        """)
-
 
 # ==============================
 # 4) APP BOA ADAPTER
@@ -1694,7 +1515,6 @@ app_choice = st.sidebar.radio(
     (
         "EQDOM_MARKETING",
         "BOA_MARKETING",
-        "WS_MRKG_APP_ADD_0",
         "BOA_REPORT_GENERATOR",
     ),
     key="main_app_choice"
@@ -1706,9 +1526,6 @@ if app_choice == "EQDOM_MARKETING":
 elif app_choice == "BOA_MARKETING":
     app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")
     app_avt_to_apt()
-elif app_choice == "BOA_REPORT_GENERATOR":
+else:
     app_hero("Génération IN_REPORT & IN_SVI", "Croisement des exports GoMobile pour générer les fichiers IN")
     app_boa_adapter()
-else:
-    app_hero("Correcteur de Numéros", "Ajout du préfixe 0 pour WS MRKG")
-    app_correcteur_telephone()

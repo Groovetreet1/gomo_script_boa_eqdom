@@ -1312,6 +1312,9 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             summary_rows = []
             results = []
 
+            # Date du ZIP = date des fichiers source (1er OUT_REPORT), pas la date du jour
+            batch_date_compact = None
+
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for c in ready:
                     prefix = c['prefix']
@@ -1324,6 +1327,9 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                         date_compact = out_report_rows[0]['dateGeneration'].replace('.', '')
                     else:
                         date_compact = datetime.now().strftime('%Y%m%d')
+
+                    if batch_date_compact is None:
+                        batch_date_compact = date_compact
 
                     in_report = generate_in_report(
                         out_svi_records, out_report_rows, calls,
@@ -1357,10 +1363,11 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         st.dataframe(pd.DataFrame(summary_rows), width='stretch')
 
         # ── Téléchargement ZIP global ──
+        zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime('%Y%m%d')
         st.download_button(
             "📦 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
             data=zip_buffer,
-            file_name=f"BOA_IN_FILES_{datetime.now().strftime('%Y%m%d')}.zip",
+            file_name=f"BOA_IN_FILES_{zip_file_date}.zip",
             mime="application/zip",
             key="boa_batch_zip"
         )

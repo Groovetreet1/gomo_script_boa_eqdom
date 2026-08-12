@@ -163,10 +163,14 @@ def inject_css():
         }
         [data-testid="stSidebar"] .stNumberInput input,
         [data-testid="stSidebar"] .stTextInput input {
-            background: rgba(255,255,255,.06);
-            border: 1px solid rgba(255,255,255,.18);
-            color: #fff;
+            background: #ffffff;
+            border: 1px solid #cdd6e0;
+            color: #3a4a5a;
             border-radius: 7px;
+        }
+        [data-testid="stSidebar"] .stNumberInput input::placeholder,
+        [data-testid="stSidebar"] .stTextInput input::placeholder {
+            color: #9aa7b3;
         }
         </style>
         """,
@@ -507,25 +511,6 @@ def app_avt_to_apt():
         "listing des invalides, export cadrillé, et nommage CLIENT_FIC_*."
     )
 
-    # Paramètres d'export dans la sidebar
-    with st.sidebar:
-        st.header("⚙️ Paramètres d'export")
-        client_choice = st.selectbox(
-            "Client (préfixe)",
-            ["BOA", "BCP", "BMCE", "EQDOM", "AUTRE"],
-            index=0,
-            key="avt_client_choice"
-        )
-        if client_choice == "AUTRE":
-            client = st.text_input(
-                "Préfixe client personnalisé",
-                value="CLIENT",
-                key="avt_client_custom"
-            ).strip() or "CLIENT"
-        else:
-            client = client_choice
-        st.caption("Le nom final sera : CLIENT_FIC_<nom_fichier_sans_( AVT )_ni_.txt>.xlsx")
-
     uploaded_files = st.file_uploader(
         "Glisse-dépose un ou plusieurs fichiers AVT (.txt) au format note",
         type=["txt"],
@@ -560,8 +545,8 @@ def app_avt_to_apt():
 
                     # Nom de sortie : CLIENT_FIC_<base>.xlsx
                     base_name = f.name.replace("( AVT )", "").replace(".txt", "").strip()
-                    out_name_ok = f"{client}_FIC_{base_name}.xlsx"
-                    out_name_bad = f"{client}_FIC_{base_name}_supprimes.xlsx"
+                    out_name_ok = f"BOA_FIC_{base_name}.xlsx"
+                    out_name_bad = f"BOA_FIC_{base_name}_supprimes.xlsx"
 
                     # ZIP des valides
                     z_ok.writestr(out_name_ok, df_to_styled_excel_bytes(df_valid).read())

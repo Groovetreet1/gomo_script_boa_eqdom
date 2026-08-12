@@ -1056,12 +1056,6 @@ def infer_out_prefix_from_call_filename(filename: str) -> str:
 
 def app_boa_adapter_batch(audio_duration, treatment_date):
     """Mode BATCH : plusieurs campagnes → ZIP de tous les IN_REPORT + IN_SVI + tableau récap."""
-    st.markdown(
-        "Ce mode traite **toutes les campagnes en même temps** : dépose tous les fichiers "
-        "`OUT_SVI` + `OUT_REPORT` (`.txt`) et tous les fichiers d'appels GoMobile (CSV/Excel). "
-        "Le mapping préfixe appels → préfixe OUT est automatique : ACT→ACTIVATION, ATT→ATTRITIONS, "
-        "CNA→CARTENACTIVE, CNR→CARTENREMISE, WLCM→WELCOME."
-    )
 
     # ── Étape 1 : OUT fichiers ──
     st.subheader("📁 Étape 1 : Déposer tous les fichiers OUT (.txt)")

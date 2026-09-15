@@ -1233,26 +1233,47 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
     # Conserver df original pour extraction si besoin (deja fait en amont)
     df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
-    # Nouveau par ligne (cas double ancien+nouveau) : extrait AVANT troncature, depuis colonnes dédiées UNIQUEMENT (jamais Intermediaire)
+    # Cas double/force : priorité 1 = code digits depuis Intermediaire (si dans mapping jdid) -> base unique pour tout le fichier.
+    # Priorité 2 = nouveau par ligne depuis colonnes dédiées (ancien/nouveau/code), jamais via noms (nominations proches).
     _nouveau_par_ligne = {}
+    _base_intermediaire = None
     if force_regenerer_tous:
         try:
             _num2c_loc = get_mapping_numero_vers_code()
-            _ded_loc = [c for c in df.columns if any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new']) and 'police' not in c and 'numero' not in c]
-            # Exclure Intermediaire générique même si 'agence' dedans sans code/ancien/nouveau
-            _ded_loc = [c for c in _ded_loc if not (c in ['intermediaire', 'agence', 'interm'])]
-            if _ded_loc:
-                for _idx, _row in df.iterrows():
-                    _cl = []
-                    for _cc in _ded_loc:
-                        try:
-                            _m4 = re.search(r'(\d{4})', str(_row[_cc]))
-                            if _m4 and _m4.group(1)[:4] in _num2c_loc:
-                                _cl.append(_m4.group(1)[:4])
-                        except:
-                            pass
-                    if _cl:
-                        _nouveau_par_ligne[_idx] = _cl[-1]
+            # 1) Intermediaire générique : digits + vérif mapping (pas de matching par nom)
+            _inter_cols = [c for c in df.columns if c in ['intermediaire', 'agence', 'interm'] or 'intermediaire' in c]
+            _inter_cols = [c for c in _inter_cols if 'police' not in c and 'numero' not in c]
+            # Exclure les dédiées qui contiennent aussi 'agence' mais avec code/ancien/nouveau (ex: 'code agence')
+            _inter_gen = [c for c in _inter_cols if not any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])]
+            if _inter_gen:
+                from collections import Counter as _Counter
+                _codes_inter = []
+                for _cc in _inter_gen:
+                    try:
+                        for _vv in df[_cc].dropna().head(20):
+                            _mI = re.search(r'(\d{4})', str(_vv))
+                            if _mI and _mI.group(1)[:4] in _num2c_loc:
+                                _codes_inter.append(_mI.group(1)[:4])
+                    except:
+                        pass
+                if _codes_inter:
+                    _base_intermediaire = _Counter(_codes_inter).most_common(1)[0][0]
+            # 2) Par ligne depuis dédiées (si pas de base Intermediaire)
+            if not _base_intermediaire:
+                _ded_loc = [c for c in df.columns if any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new']) and 'police' not in c and 'numero' not in c]
+                _ded_loc = [c for c in _ded_loc if not (c in ['intermediaire', 'agence', 'interm'])]
+                if _ded_loc:
+                    for _idx, _row in df.iterrows():
+                        _cl = []
+                        for _cc in _ded_loc:
+                            try:
+                                _m4 = re.search(r'(\d{4})', str(_row[_cc]))
+                                if _m4 and _m4.group(1)[:4] in _num2c_loc:
+                                    _cl.append(_m4.group(1)[:4])
+                            except:
+                                pass
+                        if _cl:
+                            _nouveau_par_ligne[_idx] = _cl[-1]
         except:
             pass
     if len(df.columns) > 15:
@@ -1348,7 +1369,12 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
                 mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
             nb_a_regenerer = int(mask_a_regenerer.sum())
             if nb_a_regenerer > 0:
-                if force_regenerer_tous and _nouveau_par_ligne:
+                if force_regenerer_tous and _base_intermediaire:
+                    # Priorité Intermediaire (digits vérifiés mapping) : base unique pour tout le fichier dès 00001
+                    _bc = re.sub(r'\D', '', str(_base_intermediaire)) or re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
+                    _nouv_all = generer_numeros_police(_bc, nb_a_regenerer, mois_courant, annee_courante)
+                    df.loc[mask_a_regenerer, "N° Police"] = _nouv_all[:nb_a_regenerer]
+                elif force_regenerer_tous and _nouveau_par_ligne:
                     # Par ligne : base = nouveau de SA ligne (dédiée), compteur par base dès 00001
                     _code_fallback = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
                     _compteurs = {}
@@ -1614,10 +1640,28 @@ def analyser_double_code_agence(df):
         return False, None, {'colonnes_candidates': [str(c) for c in _cols_avec_codes]}
     # Mode (plus fréquent) au niveau fichier
     try:
-        _nouveau = max(set(_choisis), key=_choisis.count)
+        _nouveau_dedie = max(set(_choisis), key=_choisis.count)
     except:
-        _nouveau = _choisis[-1]
-    return True, _nouveau, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5]}
+        _nouveau_dedie = _choisis[-1]
+    # Priorité Intermediaire (digits vérifiés mapping) : si le code Intermediaire est dans le mapping jdid, on le prend (demande utilisateur)
+    try:
+        from collections import Counter as _Counter2
+        _inter_gen2 = [c for c in df.columns if _is_intermediaire_generique(c)]
+        _codes_inter2 = []
+        for _cc2 in _inter_gen2:
+            try:
+                for _vv2 in df[_cc2].dropna().head(20):
+                    _mI2 = re.search(r'(\d{4})', str(_vv2))
+                    if _mI2 and _mI2.group(1)[:4] in _num2code:
+                        _codes_inter2.append(_mI2.group(1)[:4])
+            except:
+                pass
+        if _codes_inter2:
+            _nouveau_inter = _Counter2(_codes_inter2).most_common(1)[0][0]
+            return True, _nouveau_inter, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5], 'source': 'intermediaire', 'code_intermediaire': _nouveau_inter, 'code_dedie': _nouveau_dedie}
+    except:
+        pass
+    return True, _nouveau_dedie, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5], 'source': 'dediee'}
 
 def extraire_code_intermediaire_pour_generation(df, nom_agence=None, code_agence=None):
     """Extrait le code numerique de base depuis la colonne Intermediaire ou fallback agence.

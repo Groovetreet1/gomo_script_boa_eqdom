@@ -836,20 +836,16 @@ MAPPING_AGENCES_DEFAULT = {
 MAPPING_AGENCES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd(), "mapping_agences.json")
 
 def load_mapping_agences_from_file():
-    """Charge le mapping : DEFAULT + fichier JSON (le fichier complète/écrase, mais ne supprime jamais les clés du défaut)."""
-    base = MAPPING_AGENCES_DEFAULT.copy()
+    """Charge le mapping : si fichier JSON existe → retourne le fichier tel quel (respecte Remplacer tout). Sinon défaut."""
     try:
         if os.path.exists(MAPPING_AGENCES_FILE):
             with open(MAPPING_AGENCES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and data:
-                    # merge : défaut d'abord, puis fichier par-dessus (pour ne jamais perdre ex: 8009 si vieux fichier tronqué)
-                    merged = base.copy()
-                    merged.update(data)
-                    return merged
+                    return data
     except Exception as e:
         print(f"load mapping error: {e}")
-    return base
+    return MAPPING_AGENCES_DEFAULT.copy()
 
 def save_mapping_agences_to_file(mapping):
     """Sauvegarde le mapping dans le fichier JSON persistant."""
@@ -1084,15 +1080,15 @@ def detecter_agence_depuis_police_agence(df):
         vrais_codes = [c for c in numeros_testes if not c.startswith('SCI:')]
         if vrais_codes:
             codes_non_trouves = list(set(vrais_codes))[:3]
-            # Hint : si le code existe dans le défaut mais pas dans le mapping courant (vieux JSON), proposer Recharger défaut
+            # Hint : si le code existe dans le défaut mais pas dans le mapping courant (après Remplacer), proposer de l'ajouter via upsert
             hint = ""
             try:
                 _missing_in_curr = [c for c in codes_non_trouves if c not in _num2code and any(c == re.sub(r'\D', '', k)[-4:] if re.sub(r'\D', '', k) else False for k in MAPPING_AGENCES_DEFAULT.keys())]
                 if _missing_in_curr:
-                    hint = f" - '{', '.join(_missing_in_curr)}' existe dans le défaut ! Cliquez '🔄 Recharger défaut' dans Gestion MAPPING ou ajoutez-le."
+                    hint = f" - '{', '.join(_missing_in_curr)}' existe dans le défaut mais pas dans votre mapping actuel (Remplacer). Ajoutez-le via '➕ Ajouter' ou '📤 Import upsert' si besoin."
             except:
                 pass
-            return None, None, None, f"Code(s) '{', '.join(codes_non_trouves)}' non référencé(s){hint} - Vérifiez via '⚙️ Gestion MAPPING' ci-dessous (recherche 8009) puis complétez manuellement."
+            return None, None, None, f"Code(s) '{', '.join(codes_non_trouves)}' non référencé(s){hint} - Vérifiez via '⚙️ Gestion MAPPING' ci-dessous puis complétez manuellement."
         else:
             return None, None, None, f"N° Police en format scientifique (ex: 5,86E+14) - détection impossible, et Intermédiaire non trouvé"
     return None, None, None, f"Colonne '{col_police}' vide ou format invalide"

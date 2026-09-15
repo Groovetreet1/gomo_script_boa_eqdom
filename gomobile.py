@@ -1233,43 +1233,23 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
     # Conserver df original pour extraction si besoin (deja fait en amont)
     df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
-    # Cas double/force : priorité 1 = code digits depuis Intermediaire (si dans mapping jdid) -> base unique pour tout le fichier.
-    # Priorité 2 = nouveau par ligne depuis colonnes dédiées (ancien/nouveau/code), jamais via noms (nominations proches).
+    # Cas double/force : 1) base Intermediaire (digits si dans mapping), 2) sinon nouveau par ligne (dédiées). Helpers partagés, case-insensitive.
     _nouveau_par_ligne = {}
     _base_intermediaire = None
     if force_regenerer_tous:
         try:
             _num2c_loc = get_mapping_numero_vers_code()
-            # 1) Intermediaire générique : digits + vérif mapping (pas de matching par nom)
-            _inter_cols = [c for c in df.columns if c in ['intermediaire', 'agence', 'interm'] or 'intermediaire' in c]
-            _inter_cols = [c for c in _inter_cols if 'police' not in c and 'numero' not in c]
-            # Exclure les dédiées qui contiennent aussi 'agence' mais avec code/ancien/nouveau (ex: 'code agence')
-            _inter_gen = [c for c in _inter_cols if not any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])]
-            if _inter_gen:
-                from collections import Counter as _Counter
-                _codes_inter = []
-                for _cc in _inter_gen:
-                    try:
-                        for _vv in df[_cc].dropna().head(20):
-                            _mI = re.search(r'(\d{4})', str(_vv))
-                            if _mI and _mI.group(1)[:4] in _num2c_loc:
-                                _codes_inter.append(_mI.group(1)[:4])
-                    except:
-                        pass
-                if _codes_inter:
-                    _base_intermediaire = _Counter(_codes_inter).most_common(1)[0][0]
-            # 2) Par ligne depuis dédiées (si pas de base Intermediaire)
+            _base_intermediaire = _code_intermediaire_si_dans_mapping(df, _num2c_loc)
             if not _base_intermediaire:
-                _ded_loc = [c for c in df.columns if any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new']) and 'police' not in c and 'numero' not in c]
-                _ded_loc = [c for c in _ded_loc if not (c in ['intermediaire', 'agence', 'interm'])]
+                _ded_loc = [c for c in df.columns if _est_colonne_dediee(c) and 'police' not in _low_col(c) and 'numero' not in _low_col(c)]
                 if _ded_loc:
                     for _idx, _row in df.iterrows():
                         _cl = []
                         for _cc in _ded_loc:
                             try:
-                                _m4 = re.search(r'(\d{4})', str(_row[_cc]))
-                                if _m4 and _m4.group(1)[:4] in _num2c_loc:
-                                    _cl.append(_m4.group(1)[:4])
+                                _m4 = _extraire_4chiffres(_row[_cc])
+                                if _m4 and _m4 in _num2c_loc:
+                                    _cl.append(_m4)
                             except:
                                 pass
                         if _cl:
@@ -1499,12 +1479,58 @@ def creer_zip_agence(fichiers):
     return buf.getvalue()
 
 
+def _low_col(c):
+    try:
+        return nettoyer_colonne_agence(c)
+    except:
+        return str(c).lower()
+
+def _extraire_4chiffres(val):
+    if pd.isna(val):
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ('nan', 'na', 'none'):
+        return None
+    m = re.search(r'(\d{4})', s)
+    return m.group(1)[:4] if m else None
+
+def _est_colonne_dediee(nom_colonne):
+    cl = _low_col(nom_colonne)
+    return any(k in cl for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])
+
+def _est_intermediaire_generique(nom_colonne):
+    cl = _low_col(nom_colonne)
+    low = str(nom_colonne).lower()
+    return ('intermediaire' in cl or 'intermediaire' in low or 'intermediair' in low or cl in ['agence', 'interm'])
+
+def _code_intermediaire_si_dans_mapping(df, num2code):
+    """Code digits (pas noms) depuis Intermediaire générique, si dans mapping jdid. Sinon None."""
+    try:
+        from collections import Counter as _C
+        _codes = []
+        for col in df.columns:
+            if not _est_intermediaire_generique(col):
+                continue
+            if _est_colonne_dediee(col):
+                continue
+            try:
+                for vv in df[col].dropna().head(20):
+                    c4 = _extraire_4chiffres(vv)
+                    if c4 and c4 in num2code:
+                        _codes.append(c4)
+            except:
+                pass
+        if _codes:
+            return _C(_codes).most_common(1)[0][0]
+    except:
+        pass
+    return None
+
 def analyser_double_code_agence(df):
     """Détecte le cas 'deux colonnes code agence (ancien + nouveau)'.
     Retourne (double_detecte: bool, nouveau_code_fichier: str|None, details: dict).
-    Règle : parmi les colonnes type agence/code (hors N° Police), si >=2 colonnes
-    contiennent des codes, on prend par ligne le DERNIER code présent dans le mapping
-    (nouveau), et au niveau fichier le plus fréquent (mode).
+    Priorité : 1) code Intermediaire (digits) si dans mapping jdid, 2) sinon dernier dédié.
+    100% insensible à la casse (bug 'Intermediaire' vs 'intermediaire' corrigé).
     """
     try:
         _mapping = get_mapping_agences()
@@ -1560,35 +1586,23 @@ def analyser_double_code_agence(df):
             pass
     if len(_cands) < 2:
         return False, None, {'colonnes_candidates': [str(c) for c in _cands]}
-    # Extraire codes par colonne (4 chiffres) et vérifier présence mapping
-    def _code4_of(val):
-        if pd.isna(val):
-            return None
-        s = str(val).strip()
-        if not s or s.lower() in ('nan', 'na', 'none'):
-            return None
-        m = re.search(r'(\d{4})', s)
-        if m:
-            return m.group(1)[:4]
-        return None
-    # Compter colonnes qui contiennent vraiment des codes du mapping
+    # Compter colonnes qui contiennent vraiment des codes du mapping (helpers partagés)
     _cols_avec_codes = []
     for col in _cands:
         try:
             _vals = df[col].dropna().head(10)
-            _hits = sum(1 for v in _vals if (_code4_of(v) in _num2code) if _code4_of(v))
+            _hits = sum(1 for v in _vals if (_extraire_4chiffres(v) in _num2code) if _extraire_4chiffres(v))
             if _hits >= 1:
                 _cols_avec_codes.append(col)
         except:
             pass
     if len(_cols_avec_codes) < 2:
-        # Pas deux colonnes avec codes du mapping : vérifier quand même si 2 colonnes avec codes quelconques
-        # (ancien code peut ne plus être dans le mapping) -> on prend quand même le dernier existant
+        # Ancien code peut ne plus être dans le mapping -> accepter 2 colonnes avec codes quelconques
         _cols_avec_quelconque = []
         for col in _cands:
             try:
                 _vals = df[col].dropna().head(10)
-                _hq = sum(1 for v in _vals if _code4_of(v))
+                _hq = sum(1 for v in _vals if _extraire_4chiffres(v))
                 if _hq >= 1:
                     _cols_avec_quelconque.append(col)
             except:
@@ -1596,40 +1610,20 @@ def analyser_double_code_agence(df):
         if len(_cols_avec_quelconque) < 2:
             return False, None, {'colonnes_candidates': [str(c) for c in _cands]}
         _cols_avec_codes = _cols_avec_quelconque
-    # Nouveau = DERNIERE colonne dédiée UNIQUEMENT (jamais Intermediaire générique -> nominations proches = erreur).
-    # Dédiée = header contient 'code'/'ancien'/'nouveau'/'new'/'old'. Intermediaire générique exclu d'office.
-    def _is_dediee(col):
-        try:
-            _cl = nettoyer_colonne_agence(col)
-        except:
-            _cl = str(col).lower()
-        return any(k in _cl for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])
-    def _is_intermediaire_generique(col):
-        try:
-            _cl = nettoyer_colonne_agence(col)
-        except:
-            _cl = str(col).lower()
-        _low = str(col).lower()
-        return ('intermediaire' in _cl or 'intermediaire' in _low or 'intermediair' in _low or _cl in ['agence', 'interm'])
-    _dediees = [c for c in _cols_avec_codes if _is_dediee(c)]
+    _dediees = [c for c in _cols_avec_codes if _est_colonne_dediee(c)]
     if _dediees:
         _cols_nouveau = _dediees
     else:
-        # Aucune dédiée : exclure Intermediaire générique (sinon nomination proche = faux nouveau)
-        _non_generiques = [c for c in _cols_avec_codes if not _is_intermediaire_generique(c)]
+        _non_generiques = [c for c in _cols_avec_codes if not _est_intermediaire_generique(c)]
         if not _non_generiques:
             return False, None, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'raison': 'que Intermediaire, pas de colonne nouveau dediee'}
         _cols_nouveau = _non_generiques
-    # Cas 1 dédiée + générique avec codes différents (ancien en Intermediaire, nouveau en Code) -> double aussi
-    if len(_dediees) == 1 and len(_cols_avec_codes) >= 2:
-        pass  # on garde _cols_nouveau = dédiée (nouveau), Intermediaire ignoré pour le choix
-    # Par ligne : prendre le DERNIER code dédié présent dans le mapping (nouveau)
     _choisis = []
     for _, row in df.head(1000).iterrows():
         _codes_ligne = []
         for col in _cols_nouveau:
             try:
-                _c4 = _code4_of(row[col])
+                _c4 = _extraire_4chiffres(row[col])
                 if _c4 and _c4 in _num2code:
                     _codes_ligne.append(_c4)
             except:
@@ -1638,29 +1632,14 @@ def analyser_double_code_agence(df):
             _choisis.append(_codes_ligne[-1])
     if not _choisis:
         return False, None, {'colonnes_candidates': [str(c) for c in _cols_avec_codes]}
-    # Mode (plus fréquent) au niveau fichier
     try:
         _nouveau_dedie = max(set(_choisis), key=_choisis.count)
     except:
         _nouveau_dedie = _choisis[-1]
-    # Priorité Intermediaire (digits vérifiés mapping) : si le code Intermediaire est dans le mapping jdid, on le prend (demande utilisateur)
-    try:
-        from collections import Counter as _Counter2
-        _inter_gen2 = [c for c in df.columns if _is_intermediaire_generique(c)]
-        _codes_inter2 = []
-        for _cc2 in _inter_gen2:
-            try:
-                for _vv2 in df[_cc2].dropna().head(20):
-                    _mI2 = re.search(r'(\d{4})', str(_vv2))
-                    if _mI2 and _mI2.group(1)[:4] in _num2code:
-                        _codes_inter2.append(_mI2.group(1)[:4])
-            except:
-                pass
-        if _codes_inter2:
-            _nouveau_inter = _Counter2(_codes_inter2).most_common(1)[0][0]
-            return True, _nouveau_inter, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5], 'source': 'intermediaire', 'code_intermediaire': _nouveau_inter, 'code_dedie': _nouveau_dedie}
-    except:
-        pass
+    # Priorité Intermediaire (digits vérifiés mapping, jamais noms)
+    _nouveau_inter = _code_intermediaire_si_dans_mapping(df, _num2code)
+    if _nouveau_inter:
+        return True, _nouveau_inter, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5], 'source': 'intermediaire', 'code_intermediaire': _nouveau_inter, 'code_dedie': _nouveau_dedie}
     return True, _nouveau_dedie, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5], 'source': 'dediee'}
 
 def extraire_code_intermediaire_pour_generation(df, nom_agence=None, code_agence=None):

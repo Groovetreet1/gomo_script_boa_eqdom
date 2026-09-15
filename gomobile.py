@@ -1233,6 +1233,28 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
     # Conserver df original pour extraction si besoin (deja fait en amont)
     df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
+    # Nouveau par ligne (cas double ancien+nouveau) : extrait AVANT troncature, depuis colonnes dédiées UNIQUEMENT (jamais Intermediaire)
+    _nouveau_par_ligne = {}
+    if force_regenerer_tous:
+        try:
+            _num2c_loc = get_mapping_numero_vers_code()
+            _ded_loc = [c for c in df.columns if any(k in c for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new']) and 'police' not in c and 'numero' not in c]
+            # Exclure Intermediaire générique même si 'agence' dedans sans code/ancien/nouveau
+            _ded_loc = [c for c in _ded_loc if not (c in ['intermediaire', 'agence', 'interm'])]
+            if _ded_loc:
+                for _idx, _row in df.iterrows():
+                    _cl = []
+                    for _cc in _ded_loc:
+                        try:
+                            _m4 = re.search(r'(\d{4})', str(_row[_cc]))
+                            if _m4 and _m4.group(1)[:4] in _num2c_loc:
+                                _cl.append(_m4.group(1)[:4])
+                        except:
+                            pass
+                    if _cl:
+                        _nouveau_par_ligne[_idx] = _cl[-1]
+        except:
+            pass
     if len(df.columns) > 15:
         df = df.iloc[:, :15]
     for col in MODELE_COLONNES:
@@ -1326,26 +1348,48 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
                 mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
             nb_a_regenerer = int(mask_a_regenerer.sum())
             if nb_a_regenerer > 0:
-                # Éviter doublons avec les N° déjà gardés
-                try:
-                    gardes = set(df.loc[~mask_a_regenerer, "N° Police"].astype(str).tolist())
-                except:
-                    gardes = set()
-                nouveaux = []
-                _i = 1
-                _code_clean = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
-                _base = f"{_code_clean}{mois_courant}{annee_courante}"
-                # Générer en sautant les existants (sécurité anti-boucle infinie)
-                _guard = 0
-                while len(nouveaux) < nb_a_regenerer and _guard < nb_a_regenerer + len(gardes) + 1000:
-                    _guard += 1
-                    cand = f"{_base}{_i:05d}"
-                    _i += 1
-                    if cand in gardes:
-                        continue
-                    nouveaux.append(cand)
-                    gardes.add(cand)
-                df.loc[mask_a_regenerer, "N° Police"] = nouveaux[:nb_a_regenerer]
+                if force_regenerer_tous and _nouveau_par_ligne:
+                    # Par ligne : base = nouveau de SA ligne (dédiée), compteur par base dès 00001
+                    _code_fallback = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
+                    _compteurs = {}
+                    _gardes2 = set()
+                    _vals_par_idx = {}
+                    for _idx in df.index[mask_a_regenerer]:
+                        _b = _nouveau_par_ligne.get(_idx, _code_fallback)
+                        _b = re.sub(r'\D', '', str(_b)) or _code_fallback
+                        _cpt = _compteurs.get(_b, 0) + 1
+                        # Sauter doublons improbables (sécurité)
+                        _guard2 = 0
+                        while f"{_b}{mois_courant}{annee_courante}{_cpt:05d}" in _gardes2 and _guard2 < 10000:
+                            _cpt += 1
+                            _guard2 += 1
+                        _compteurs[_b] = _cpt
+                        _cand2 = f"{_b}{mois_courant}{annee_courante}{_cpt:05d}"
+                        _gardes2.add(_cand2)
+                        _vals_par_idx[_idx] = _cand2
+                    for _idx, _vv in _vals_par_idx.items():
+                        df.at[_idx, "N° Police"] = _vv
+                else:
+                    # Éviter doublons avec les N° déjà gardés
+                    try:
+                        gardes = set(df.loc[~mask_a_regenerer, "N° Police"].astype(str).tolist())
+                    except:
+                        gardes = set()
+                    nouveaux = []
+                    _i = 1
+                    _code_clean = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
+                    _base = f"{_code_clean}{mois_courant}{annee_courante}"
+                    # Générer en sautant les existants (sécurité anti-boucle infinie)
+                    _guard = 0
+                    while len(nouveaux) < nb_a_regenerer and _guard < nb_a_regenerer + len(gardes) + 1000:
+                        _guard += 1
+                        cand = f"{_base}{_i:05d}"
+                        _i += 1
+                        if cand in gardes:
+                            continue
+                        nouveaux.append(cand)
+                        gardes.add(cand)
+                    df.loc[mask_a_regenerer, "N° Police"] = nouveaux[:nb_a_regenerer]
         except Exception as e:
             print(f"Erreur generation N° Police: {e}")
     return df

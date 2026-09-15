@@ -4,12 +4,14 @@ import pandas as pd
 import zipfile
 import re
 import io
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.styles import Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Border, Side, Font, Alignment, PatternFill
 import os
+import json
 import math
 
 # ==============================
@@ -618,6 +620,1264 @@ def app_avt_to_apt():
         "supprimer les doublons GSM, lister les invalides. Noms: CLIENT_FIC_<base>.xlsx"
     )
 
+
+
+# ==============================
+# 3) APP TRAITEMENT AGENCE (Assurcall)
+#    (fichier app_traitement_agence_v10.py - intégré)
+# ==============================
+
+MAPPING_AGENCES_DEFAULT = {
+    "AGENT_A6666": "SRAGHNA",
+    "AGENT_A6481": "LE COMPTOIR D ASSURANCES",
+    "AGENT_A5836": "AVENIR DU SAHARA",
+    "AGENT_A6662": "SOLUDO",
+    "AGENT_A6541": "ATTAOUKIL",
+    "AGENT_A6581": "TALIOUINE",
+    "AGENT_A6548": "LAKHMIRI ASSURANCES SARL",
+    "AGENT_A6594": "BOUTADGHART",
+    "AGENT_A6597": "MOKRIM",
+    "AGENT_A5886": "PACKASSUR",
+    "AGENT_A6657": "BELBEKKAR ASSURANCES",
+    "AGENT_A6586": "GHANANE",
+    "AGENT_A6630": "ASSURANCE JANTI",
+    "AGENT_A6634": "ASSURANCES RAMI",
+    "AGENT_A4409": "ASSURANCES ELBAHIA",
+    "AGENT_A5882": "ASSURANCE CHARAF",
+    "AGENT_A5970": "IZIKI ASSUR",
+    "AGENT_A6444": "ERRAFAY ASSURANCE CONSEIL SARL",
+    "AGENT_A6452": "AGENT ASSIF ASSURANCES CONSEIL",
+    "AGENT_A6472": "CHAKROUNI RACHAD ASSURANCES",
+    "AGENT_A6496": "BOUAGLOU ASSURANCES SARL",
+    "AGENT_A6513": "ASSURANCES OUED SOUSS",
+    "AGENT_A6525": "ASSURANCE LM MOURAD LOTFI & FILS",
+    "AGENT_A6575": "ASSURANCES ELKIRAM",
+    "AGENT_A6576": "ASSURANCE BOUZAGHRANE",
+    "AGENT_A6587": "EL BOUHTOURI ASSURANCE",
+    "AGENT_A6648": "HAFIDA ASSURANCES",
+    "AGENT_A6533": "ASSURANCES LES PORTES DE MARRAKECH SARL",
+    "AGENT_A6599": "ASSURANCES ANOUAL MARRAKECH",
+    "AGENT_A5998": "TARIKALKHEIR",
+    "AGENT_A6536": "DYNAMIC ASSURANCESS SARL",
+    "AGENT_A6638": "ASSURANCE BELAKRY",
+    "AGENT_A6538": "MAYAR ASSURANCES SARL",
+    "AGENT_A6633": "YARASSURANCE",
+    "AGENT_A6639": "SAWAB ASSURANCE",
+    "AGENT_A5960": "ASSURANCE CONSEIL BOUHNIK",
+    "AGENT_A6655": "AIT MELLOUL",
+    "AGENT_A6563": "AATIKFILS ASSURANCES SARL",
+    "AGENT_A6647": "FAMILY ASSURANCE SARL",
+    "AGENT_A6653": "EL BOUHTOURI BAB DOUKKALA",
+    "BGD_B8057": "BGD AKIOD",
+    "AGENT_A6656": "ASSUNOR",
+    "AGENT_A6661": "DIFAF ASSURANCE",
+    "AGENT_A6665": "ASSURANCES GHOUDAIGUI",
+    "AGENT_A6609": "EL AZZOUZIA ASSURANCE",
+    "AGENT_A6623": "ASSURANCE BOUHMAD",
+    "BGD_B7778": "BGD FES SALAMA",
+    "BGD_B7790": "BGD MISSOUR",
+    "BGD_B7791": "ZAIO",
+    "BGD_B7816": "AIT KAMRA",
+    "BGD_B7774": "BGD SEFROU",
+    "BGD_B7780": "TAROUDANT",
+    "BGD_B7779": "TIZNIT",
+    "BGD_B7792": "BGD CHAOUEN",
+    "BGD_B7775": "BGD KHEMISSET",
+    "BGD_B7803": "BGD Ras ElMa",
+    "BGD_B7866": "BGD AUTOHALL OUJDA TRAFISS",
+    "BGD_B7781": "BGD OUARZAZATE",
+    "BGD_B7952": "BGD DEROUA",
+    "BGD_B7821": "BGD TINGHIR",
+    "BGD_B7947": "BGD SALAMA KSAR EL KEBIR",
+    "BGD_B7969": "BGD KIA MARRAKECH",
+    "BGD_B7948": "BGD KIA CASA",
+    "BGD_B7807": "SALE KARIAT",
+    "BGD_B8025": "BGD BUGSHAN",
+    "AGENT_A6524": "ASSURANCES EL GUARMAI SARL",
+    "AGENT_A6582": "REDASSUR",
+    "AGENT_A6441": "Vecteur",
+    "AGENT_A6445": "IFRY",
+    "AGENT_A5830": "ASSURANCES GIRS",
+    "AGENT_A6455": "ASSURANCE SOUFIANE SARL",
+    "AGENT_A6489": "ASSURANCES ASSIHAM",
+    "AGENT_A5887": "ASSURANCES LA FRATERNITE",
+    "AGENT_A6456": "ASSURANCES CASA EST SARL",
+    "AGENT_A6462": "ASSURANCE RIAH",
+    "AGENT_A6593": "OLKOM ASSURANCES",
+    "AGENT_A6649": "ASSURANCE PERVALIS",
+    "AGENT_A6566": "NOURASSUR SARL",
+    "AGENT_A6492": "SIDI BENNOUR",
+    "AGENT_A6577": "STE NAHJASSUR SARL",
+    "AGENT_A6551": "ALHIKMA ASSURANCE SARL",
+    "AGENT_A6651": "ASSURANCES OULAD FREJ",
+    "AGENT_A6637": "UNION ASSUR",
+    "AGENT_A5878": "Chariba",
+    "AGENT_A6522": "STE SIDRA ASSURANCE",
+    "AGENT_A5864": "CONFORT ASSURANCES MIDELT",
+    "AGENT_A5837": "ASSURANCES GUERRAB",
+    "AGENT_A5841": "ASSURANCES HMAMI",
+    "AGENT_A5846": "ASSURANCES TALLA",
+    "AGENT_A5900": "ASSURANCES FILALI",
+    "AGENT_A5980": "ASSURANCES CONSEIL TAOUFIK",
+    "AGENT_A5996": "ASSURANCES FOUGHAL SARL",
+    "AGENT_A6190": "ASSURANCES BENCHEMSI SAIAR",
+    "AGENT_A6442": "REFLEX ASSURANCE SARL",
+    "AGENT_A6465": "JAADA ET CHBILI SARL",
+    "AGENT_A6561": "ASSURANCES AL HOCEIMA",
+    "AGENT_A6588": "ASSURANCE OUSSOU",
+    "AGENT_A6589": "PROXY Assurance",
+    "AGENT_A6592": "STE ASSURANCES ZAAF",
+    "AGENT_A6622": "ASSURANCES ZEGHARI",
+    "AGENT_A6583": "ELGHAZAOUATE ASSURANCES",
+    "AGENT_A6451": "OASIS ASSURANCES",
+    "AGENT_A5863": "OUADIE ASSURANCES",
+    "AGENT_A6484": "ASSURANCES OUEDZA TAOURIRT",
+    "AGENT_A6619": "ASSURANCES AL YOUSSRE",
+    "AGENT_A5770": "ASSURANCES MTALSI",
+    "AGENT_A6614": "RANAT ASSURANCE-CONSEIL",
+    "AGENT_A6646": "ZAERS",
+    "AGENT_A6530": "SAAD ASSUR SARL",
+    "AGENT_A6448": "ASSURANCES AL CHAMAL",
+    "AGENT_A6571": "ESSBAIY MHAMMED",
+    "AGENT_A5260": "ASSURANCES MAHRAZ SARL",
+    "AGENT_A5850": "ASSURANCES WATANI",
+    "AGENT_A5875": "ASSURANCES LA CAPITALE SARL",
+    "AGENT_A5876": "ASSURANCE ZAID",
+    "AGENT_A6170": "ASSURANCES BENABDELLAH",
+    "AGENT_A6340": "ASSURANCES AFIAC REGRAGUI",
+    "AGENT_A6380": "TANGER ASSURANCES CONSEIL",
+    "AGENT_A6454": "BALAFREJ ASSURANCE",
+    "AGENT_A6483": "Moderne ASSURANCE",
+    "AGENT_A6519": "ASSURANCES ZOUHAIR SARL",
+    "AGENT_A6537": "ASSURANCES ALBOUGHAZ SARL",
+    "AGENT_A6590": "ASSURANCE AJZENNAI OURIAGHLI MBM",
+    "AGENT_A6627": "CONECTE ASSURANCE",
+    "AGENT_A6620": "GROUPE ASSURANCES MOSTAINE",
+    "AGENT_A6626": "ASSURANCES ZOUMI",
+    "AGENT_A5842": "ASSURANCES BENNOUNA",
+    "AGENT_A6570": "TAAMINAT EDDAMINE",
+    "AGENT_A6250": "ASSURANCES ELMARKAZ",
+    "AGENT_A6628": "ASSURANCE DAR DMANA",
+    "BGD_B8026": "Aioun Sidi Mellouk",
+    "BGD_B8019": "BGD DAR OULAD ZIDOUH",
+    "BGD_B8023": "BGD ZEMAMRA",
+    "BGD_B8049": "BGD Ain Sebaa",
+    "BGD_B7987": "TAHANAOUT",
+    "BGD_B7080": "BGD RABAT",
+    "BGD_B8050": "BGD IMINTANOUTE",
+    "BGD_B7800": "ER RICH",
+    "BGD_B8051": "BGD TANTAN",
+    "BGD_B7990": "BIR JDID",
+    "BGD_B8039": "BGD OURIKA",
+    "BGD_B7977": "AMIZMIZ",
+    "BGD_B8016": "BOUGUEDRA",
+    "BGD_B8005": "CHICHAOUA",
+    "BGD_B7872": "BGD Ferkhana",
+    "BGD_B7899": "BGD INEZGANE",
+    "BGD_B7086": "BGD AGADIR 1",
+    "BGD_B7862": "BGD SIDI KACEM",
+    "BGD_B8047": "BGD TASSOULTANTE",
+    "BGD_B7982": "BGD HAD SOUALEM",
+    "BGD_B8030": "BGD BOUJDOUR",
+    "BGD_B7956": "BGD ELHAJEB",
+    "BGD_B8048": "BGD AOULOUZ",
+    "BGD_B8031": "BGD TINEJDAD",
+    "BGD_B8018": "BGD TADLA",
+    "BGD_B8010": "BGD DRARGA",
+    "BGD_B7989": "BGD TAMANSOURTE",
+    "BGD_B8028": "BGD LOUDAYA",
+    "BGD_B8006": "BGD LAAOUNATE",
+    "BGD_B8015": "BGD AOURIR",
+    "BGD_B7925": "SIDIBIBI",
+    "BGD_B7787": "BGD MARRAKECH HIVERNAGE",
+    "BGD_B7092": "BGD CASA",
+    "BGD_B7074": "BGD OUJDA BELHAJ",
+    "BGD_B8027": "BGD SIDI BOUKNADEL",
+    "BGD_B7084": "BGD FES",
+    "BGD_B8024": "BGD OULED BERHIL",
+    "BGD_B8040": "BGD TIKIOUINE",
+    "BGD_B7890": "BGD Echemmaia",
+    "BGD_B7986": "BGD LQLIAA",
+    "BGD_B8021": "BGD AIN TAOUJDATE",
+    "BGD_B8008": "Zaida",
+    "BGD_B8022": "BGD BEN AHMED",
+    "BGD_B8029": "BGD EL BOROUJ",
+    "BGD_B7918": "BGD BIOUGRA",
+    "AGENT_A6683": "Agence Luxora assurance Ain HARROUDA",
+    "BGD_B7820": "BGD FQUIH BEN SALEH",
+    "BGD_B7991": "BGD DEROUA CENTRE",
+    "BGD_B7937": "BGD El GARA",
+    "BGD_B7978": "AIT AMIRA",
+    "BGD_B7985": "ARFOUD",
+    "BGD_B7992": "BGD AGADIR HAY SALAM",
+    "BGD_B7988": "BGD BERKANE",
+    "BGD_B8007": "Mediouna",
+    "BGD_B8009": "Oulad Ayad",
+    "BGD_B7993": "TAZA",
+    "BGD_B8012": "DEMNATE",
+    "BGD_B8014": "BGD MOHAMMEDIA",
+    "BGD_B7979": "DAKHLA",
+    "BGD_B8011": "BRADIA",
+    "AGENT_A6607": "ASSURANCES AL MADAR",
+    "AGENT_A6608": "SEBKI ASSURANCES",
+    "AGENT_A6615": "COIN DE L ASSURANCE",
+    "AGENT_A6625": "ASSURANCES TALMESTE",
+    "AGENT_A5180": "ASSUR-ALWATA-ESS",
+    "AGENT_A6446": "JNK",
+    "BGD_B7955": "BGD Selouane",
+    "AGENT_A6668": "WEST MED ASSURANCE",
+    "AGENT_A6684": "Assurances Unies",
+    "AGENT_A5920": "RIAD ASSURANCES",
+    "BGD_B8013": "BGD BELFAA",
+    "AGENT_A6549": "ASSURANCES BOUZID"
+}
+
+# Fichier persistant pour le mapping (JSON a cote du script)
+MAPPING_AGENCES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd(), "mapping_agences.json")
+
+def load_mapping_agences_from_file():
+    """Charge le mapping depuis le fichier JSON persistant, sinon retourne le defaut."""
+    try:
+        if os.path.exists(MAPPING_AGENCES_FILE):
+            with open(MAPPING_AGENCES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
+    except Exception as e:
+        print(f"load mapping error: {e}")
+    return MAPPING_AGENCES_DEFAULT.copy()
+
+def save_mapping_agences_to_file(mapping):
+    """Sauvegarde le mapping dans le fichier JSON persistant."""
+    try:
+        with open(MAPPING_AGENCES_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"save mapping error: {e}")
+        return False
+
+def get_mapping_agences():
+    """Retourne le mapping courant (session_state > fichier > defaut)."""
+    try:
+        if "mapping_agences" in st.session_state:
+            return st.session_state["mapping_agences"]
+    except:
+        pass
+    mapping = load_mapping_agences_from_file()
+    try:
+        st.session_state["mapping_agences"] = mapping
+    except:
+        pass
+    return mapping
+
+def get_mapping_numero_vers_code():
+    mapping = get_mapping_agences()
+    d = {}
+    for code in mapping.keys():
+        mm = re.search(r"(\d+)$", code)
+        if mm:
+            d[mm.group(1)] = code
+    return d
+
+def get_liste_agences_dropdown():
+    mapping = get_mapping_agences()
+    return [""] + sorted([f"{nom} ({code})" for code, nom in mapping.items()], key=lambda x: x.lower())
+
+# Compatibilite : garde les anciens noms mais dynamiques au chargement initial
+try:
+    _initial = load_mapping_agences_from_file()
+    MAPPING_AGENCES = _initial
+    MAPPING_NUMERO_VERS_CODE = {}
+    for _code in MAPPING_AGENCES.keys():
+        _match = re.search(r"(\d+)$", _code)
+        if _match:
+            MAPPING_NUMERO_VERS_CODE[_match.group(1)] = _code
+    LISTE_AGENCES_DROPDOWN = [""] + sorted([f"{nom} ({code})" for code, nom in MAPPING_AGENCES.items()], key=lambda x: x.lower())
+except:
+    MAPPING_AGENCES = MAPPING_AGENCES_DEFAULT.copy()
+    MAPPING_NUMERO_VERS_CODE = {}
+    for _code in MAPPING_AGENCES.keys():
+        _match = re.search(r"(\d+)$", _code)
+        if _match:
+            MAPPING_NUMERO_VERS_CODE[_match.group(1)] = _code
+    LISTE_AGENCES_DROPDOWN = [""] + sorted([f"{nom} ({code})" for code, nom in MAPPING_AGENCES.items()], key=lambda x: x.lower())
+
+def _sync_mapping_globals(mapping):
+    """Met a jour les globals pour compatibilite apres modification."""
+    global MAPPING_AGENCES, MAPPING_NUMERO_VERS_CODE, LISTE_AGENCES_DROPDOWN
+    MAPPING_AGENCES = mapping
+    MAPPING_NUMERO_VERS_CODE = {}
+    for _code in mapping.keys():
+        _match = re.search(r"(\d+)$", _code)
+        if _match:
+            MAPPING_NUMERO_VERS_CODE[_match.group(1)] = _code
+    LISTE_AGENCES_DROPDOWN = [""] + sorted([f"{nom} ({code})" for code, nom in mapping.items()], key=lambda x: x.lower())
+    try:
+        st.session_state["mapping_agences"] = mapping
+    except:
+        pass
+    save_mapping_agences_to_file(mapping)
+
+MODELE_COLONNES = [
+    "N° Police", "Intermediaire", "CIN", "Nom/Raison sociale", "Usage",
+    "Immatriculation", "Duree", "Date Effet", "Date Echeance", "Heure Echeance",
+    "Segment", "Risque départ", "Appétence MRH", "Etat", "Telephone"
+]
+
+COLONNES_VIDES = ["Segment", "Risque départ", "Appétence MRH"]
+
+ALIASES_COLONNES = {
+    "numero_police": "N° Police", "numéro_police": "N° Police", "num police": "N° Police",
+    "police": "N° Police", "n police": "N° Police", "npolice": "N° Police",
+    "n° police": "N° Police", "n°police": "N° Police",
+    "interm": "Intermediaire", "intermediaire": "Intermediaire", "agence": "Intermediaire",
+    "cin": "CIN", "nom": "Nom/Raison sociale", "nom_client": "Nom/Raison sociale",
+    "nom client": "Nom/Raison sociale", "raison sociale": "Nom/Raison sociale",
+    "nomraison sociale": "Nom/Raison sociale",
+    "client": "Nom/Raison sociale", "usage": "Usage", "designation": "Usage",
+    "immatriculation": "Immatriculation", "immat": "Immatriculation", "matricule": "Immatriculation", "matricule vehicule": "Immatriculation", "matriculevehicule": "Immatriculation", "plaque": "Immatriculation", "plaque immatriculation": "Immatriculation",
+    "duree": "Duree", "durée": "Duree", "date_effet": "Date Effet",
+    "date effet": "Date Effet", "date_echeance": "Date Echeance",
+    "date echeance": "Date Echeance", "echeance": "Date Echeance",
+    "heure echeance": "Heure Echeance", "heure_echeance": "Heure Echeance",
+    "segment": "Segment",
+    "risque depart": "Risque départ", "risque dpart": "Risque départ",
+    "appetence mrh": "Appétence MRH", "apptence mrh": "Appétence MRH",
+    "etat": "Etat", "statut": "Etat",
+    "telephone": "Telephone", "telephone_1": "Telephone", "tel": "Telephone",
+    "gsm": "Telephone", "mobile": "Telephone"
+}
+
+def lire_fichier_agence(fichier):
+    nom_fichier = fichier.name.lower()
+    contenu = fichier.read()
+    fichier.seek(0)
+    if contenu.startswith(b'PK'):
+        return pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl')
+    elif contenu.startswith(b'\xd0\xcf\x11\xe0'):
+        # Vrai fichier .xls OLE - nécessite xlrd
+        try:
+            return pd.read_excel(BytesIO(contenu), dtype=str, engine='xlrd')
+        except ImportError as e:
+            # xlrd non installé - fallback texte déguisé
+            try:
+                try:
+                    texte = contenu.decode('utf-8')
+                except:
+                    texte = contenu.decode('latin-1')
+                if '\t' in texte[:2000] or '\n' in texte[:2000]:
+                    premiere_ligne = texte.split('\n')[0]
+                    if '\t' in premiere_ligne:
+                        return pd.read_csv(StringIO(texte), dtype=str, sep='\t')
+                    elif ';' in premiere_ligne:
+                        return pd.read_csv(StringIO(texte), dtype=str, sep=';')
+                    elif ',' in premiere_ligne:
+                        return pd.read_csv(StringIO(texte), dtype=str, sep=',')
+                try:
+                    return pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl')
+                except:
+                    pass
+            except:
+                pass
+            raise Exception(f"Import xlrd manquant. Installez xlrd ≥ 2.0.1 via 'pip install xlrd' pour lire les fichiers .xls anciens. Erreur d'origine: {e}")
+        except Exception as e:
+            if 'xlrd' in str(e).lower() or 'Import' in str(e):
+                raise
+            try:
+                return pd.read_excel(BytesIO(contenu), dtype=str)
+            except Exception as e2:
+                raise Exception(f"Erreur lecture xls OLE: {e2} (xlrd requis)")
+    else:
+        try:
+            try:
+                texte = contenu.decode('utf-8')
+            except:
+                texte = contenu.decode('latin-1')
+            premiere_ligne = texte.split('\n')[0]
+            if '\t' in premiere_ligne:
+                return pd.read_csv(StringIO(texte), dtype=str, sep='\t')
+            elif ';' in premiere_ligne:
+                return pd.read_csv(StringIO(texte), dtype=str, sep=';')
+            elif ',' in premiere_ligne:
+                return pd.read_csv(StringIO(texte), dtype=str, sep=',')
+            else:
+                return pd.read_csv(StringIO(texte), dtype=str, sep=None, engine='python')
+        except Exception as e:
+            raise Exception(f"Format de fichier non reconnu: {str(e)}")
+
+def nettoyer_colonne_agence(col):
+    col = str(col).strip().lower()
+    col = re.sub(r"[^\w\s]", "", col)
+    col = col.replace('é', 'e').replace('è', 'e').replace('ê', 'e')
+    col = col.replace('à', 'a').replace('â', 'a')
+    col = col.replace('ô', 'o').replace('î', 'i').replace('û', 'u')
+    return col.strip()
+
+def nettoyer_nom_fichier_agence(nom):
+    return re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", nom).strip()).upper()
+
+def trouver_colonne_police_agence(df):
+    for col in df.columns:
+        col_clean = nettoyer_colonne_agence(col)
+        if "police" in col_clean or "numero" in col_clean:
+            return col
+    return None
+
+def detecter_agence_depuis_police_agence(df):
+    _mapping = get_mapping_agences()
+    _num2code = get_mapping_numero_vers_code()
+    col_police = trouver_colonne_police_agence(df)
+    numeros_testes = []
+    if col_police is not None:
+        for val in df[col_police].dropna().head(10):
+            val_str = str(val).strip()
+            # Si format scientifique (5,86E+14) -> invalide, on ignore pour fallback Intermediaire
+            if 'E+' in val_str.upper():
+                # essayer de voir si c'est un float scientifique : on le considère invalide
+                numeros_testes.append('SCI:' + val_str[:10])
+                continue
+            chiffres = re.findall(r'\d', val_str)
+            if len(chiffres) < 4:
+                continue
+            quatre = ''.join(chiffres[:4])
+            numeros_testes.append(quatre)
+            if quatre in _num2code:
+                code = _num2code[quatre]
+                return code, _mapping[code], quatre, None
+        # Si on a trouvé un code mais non référencé, on ne retourne pas tout de suite, on tente fallback Intermediaire
+        # On garde numeros_testes pour message si fallback echoue aussi
+    # Fallback : essayer via Intermediaire (plus fiable quand N° Police est en 5,86E+14)
+    col_inter = None
+    for col in df.columns:
+        low = str(col).lower()
+        if 'intermediaire' in low or 'intermediair' in low:
+            col_inter = col
+            break
+    if col_inter is not None:
+        for val in df[col_inter].dropna().head(10):
+            s = str(val).strip()
+            if not s or s.lower() == 'nan':
+                continue
+            m = re.search(r'(\d{4,5})', s)
+            if m:
+                quatre = m.group(1)[:4]
+                if quatre in _num2code:
+                    code = _num2code[quatre]
+                    return code, _mapping[code], quatre, None
+                else:
+                    numeros_testes.append(quatre)
+    if col_police is None:
+        colonnes = ", ".join([str(c)[:20] for c in df.columns[:5]])
+        return None, None, None, f"Colonne 'N° Police' non trouvée. Colonnes: {colonnes}..."
+    if numeros_testes:
+        # Filtrer les SCI pour message plus clair
+        vrais_codes = [c for c in numeros_testes if not c.startswith('SCI:')]
+        if vrais_codes:
+            codes_non_trouves = list(set(vrais_codes))[:3]
+            return None, None, None, f"Code(s) '{', '.join(codes_non_trouves)}' non référencé(s) - N° Police en format scientifique ? Détection via Intermédiaire aussi échouée."
+        else:
+            return None, None, None, f"N° Police en format scientifique (ex: 5,86E+14) - détection impossible, et Intermédiaire non trouvé"
+    return None, None, None, f"Colonne '{col_police}' vide ou format invalide"
+
+def get_nom_agence_from_code(code_input):
+    _mapping = get_mapping_agences()
+    _num2code = get_mapping_numero_vers_code()
+    code_input = str(code_input).strip().upper()
+    if code_input in _mapping:
+        return code_input, _mapping[code_input]
+    chiffres = re.sub(r'\D', '', code_input)
+    if chiffres in _num2code:
+        code = _num2code[chiffres]
+        return code, _mapping[code]
+    return None, None
+
+def extraire_code_from_dropdown(selection):
+    if not selection:
+        return None, None
+    _mapping = get_mapping_agences()
+    match = re.search(r"\(([^)]+)\)$", selection)
+    if match:
+        code = match.group(1)
+        return code, _mapping.get(code)
+    return None, None
+
+def detecter_format_date_agence(df, col_name):
+    if col_name is None:
+        return 'FR'
+    for val in df[col_name].dropna().head(20):
+        if isinstance(val, (pd.Timestamp, datetime)):
+            return 'ISO'
+        val_str = str(val).strip()
+        match = re.match(r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$', val_str)
+        if match:
+            p1, p2 = int(match.group(1)), int(match.group(2))
+            if p1 > 12:
+                return 'FR'
+            elif p2 > 12:
+                return 'US'
+        if re.match(r'^\d{4}-\d{2}-\d{2}', val_str):
+            return 'ISO'
+    return 'FR'
+
+def convertir_date_agence(valeur, format_detecte='FR'):
+    if pd.isna(valeur) or str(valeur).strip() == "":
+        return None
+    if isinstance(valeur, (pd.Timestamp, datetime)):
+        return valeur
+    val_str = str(valeur).strip()
+    if re.match(r'^\d{4}-\d{2}-\d{2}', val_str):
+        try:
+            return pd.to_datetime(val_str)
+        except:
+            pass
+    match = re.match(r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$', val_str)
+    if match:
+        p1, p2, p3 = match.group(1), match.group(2), match.group(3)
+        if len(p3) == 2:
+            p3 = str(2000 + int(p3)) if int(p3) < 50 else str(1900 + int(p3))
+        try:
+            if format_detecte == 'US':
+                return datetime(int(p3), int(p1), int(p2))
+            else:
+                return datetime(int(p3), int(p2), int(p1))
+        except:
+            try:
+                if format_detecte == 'US':
+                    return datetime(int(p3), int(p2), int(p1))
+                else:
+                    return datetime(int(p3), int(p1), int(p2))
+            except:
+                pass
+    try:
+        return pd.to_datetime(val_str, dayfirst=(format_detecte == 'FR'))
+    except:
+        return None
+
+def detecter_mois_echeance_agence(df, format_date='FR'):
+    col_ech = None
+    for col in df.columns:
+        col_lower = nettoyer_colonne_agence(col)
+        if "echeance" in col_lower:
+            col_ech = col
+            break
+    if col_ech is None:
+        return datetime.now().strftime("%m%Y")
+    mois = {}
+    for val in df[col_ech].dropna():
+        d = convertir_date_agence(val, format_date)
+        if d:
+            k = d.strftime("%m%Y")
+            mois[k] = mois.get(k, 0) + 1
+    return max(mois, key=mois.get) if mois else datetime.now().strftime("%m%Y")
+
+def formater_telephone_agence(valeur):
+    if pd.isna(valeur):
+        return "NA"
+    tel = re.sub(r"\D", "", str(valeur))
+    if tel.startswith("212") and len(tel) > 9:
+        tel = "0" + tel[3:]
+    if len(tel) == 9 and tel[0] in ['6', '7', '5']:
+        tel = "0" + tel
+    return tel if tel else "NA"
+
+def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermediaire=None, mois_courant=None, annee_courante=None):
+    # Conserver df original pour extraction si besoin (deja fait en amont)
+    df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
+    df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
+    if len(df.columns) > 15:
+        df = df.iloc[:, :15]
+    for col in MODELE_COLONNES:
+        if col not in df.columns:
+            if col == "Intermediaire":
+                df[col] = nom_agence
+            elif col == "Duree":
+                df[col] = "F"
+            elif col == "Heure Echeance":
+                df[col] = "12"
+            elif col == "Etat":
+                df[col] = "En cours"
+            elif col in COLONNES_VIDES:
+                df[col] = None
+            else:
+                df[col] = "NA"
+    # Ne pas écraser Intermediaire : garder la valeur d\'origine (ex: "A5863 - OUADIE ASSURANCES")
+    # Remplir seulement si vide/NA/manquant
+    if "Intermediaire" in df.columns:
+        df["Intermediaire"] = df["Intermediaire"].apply(lambda x: nom_agence if pd.isna(x) or str(x).strip() == "" or str(x).strip().upper() == "NA" else x)
+    else:
+        df["Intermediaire"] = nom_agence
+    df["Telephone"] = df["Telephone"].apply(formater_telephone_agence)
+    df["Date Effet"] = df["Date Effet"].apply(lambda x: convertir_date_agence(x, format_date))
+    df["Date Echeance"] = df["Date Echeance"].apply(lambda x: convertir_date_agence(x, format_date))
+    # === Si Date Effet vide → Jour/Mois de l\'échéance + année précédente (ex: 10/10/2026 → 10/10/2025) ===
+    try:
+        for idx in df.index:
+            eff = df.at[idx, "Date Effet"]
+            ech = df.at[idx, "Date Echeance"]
+            if (pd.isna(eff) or eff is None) and pd.notna(ech) and ech is not None:
+                try:
+                    # ech est déjà datetime/Timestamp
+                    # On garde jour/mois de ech, année -1
+                    if isinstance(ech, pd.Timestamp):
+                        ech_dt = ech.to_pydatetime()
+                    else:
+                        ech_dt = ech
+                    # Gestion 29 fevrier -> 28 fevrier si année précédente non bissextile
+                    try:
+                        new_eff = ech_dt.replace(year=ech_dt.year - 1)
+                    except ValueError:
+                        # 29/02 -> 28/02
+                        import calendar
+                        # Reculer d\'un an en gardant jour valide
+                        new_eff = ech_dt - pd.DateOffset(years=1)
+                        # pd.DateOffset renvoie Timestamp, convertir
+                        if isinstance(new_eff, pd.Timestamp):
+                            new_eff = new_eff.to_pydatetime()
+                    df.at[idx, "Date Effet"] = pd.to_datetime(new_eff)
+                except Exception as _e:
+                    pass
+    except Exception as _e:
+        pass
+    for col in MODELE_COLONNES:
+        if col in ["Date Effet", "Date Echeance"]:
+            continue
+        if col in COLONNES_VIDES:
+            # Segment / Risque départ / Appétence MRH : laisser vide (pas de NA)
+            df[col] = df[col].apply(lambda x: None if pd.isna(x) or str(x).strip() == "" or str(x).strip().upper() == "NA" else x)
+        elif col == "Etat":
+            # Etat : toujours En cours par défaut si vide
+            df[col] = df[col].apply(lambda x: "En cours" if pd.isna(x) or str(x).strip() == "" or str(x).strip().upper() == "NA" else x)
+        elif col == "Immatriculation":
+            # Immatriculation : vide, NA, ou que des caractères non alphanumériques (---, --, ///, ...) -> NA obligatoire
+            def _clean_immat(x):
+                if pd.isna(x):
+                    return "NA"
+                s = str(x).strip()
+                if s == "" or s.upper() == "NA":
+                    return "NA"
+                if not re.search(r'[A-Za-z0-9]', s):
+                    return "NA"
+                return x
+            df[col] = df[col].apply(_clean_immat)
+        else:
+            # CIN / Nom/Raison sociale / Usage / autres : vide -> NA
+            df[col] = df[col].apply(lambda x: "NA" if pd.isna(x) or str(x).strip() == "" else x)
+    df = df.reindex(columns=MODELE_COLONNES)
+    # === Generation N° Police sequentielle base sur code intermediaire + MMYYYY + 00001 ===
+    if code_base_intermediaire is not None:
+        try:
+            n = len(df)
+            if mois_courant is None:
+                mois_courant = datetime.now().strftime('%m')
+            if annee_courante is None:
+                annee_courante = datetime.now().strftime('%Y')
+            nouveaux = generer_numeros_police(code_base_intermediaire, n, mois_courant, annee_courante)
+            df["N° Police"] = nouveaux
+        except Exception as e:
+            print(f"Erreur generation N° Police: {e}")
+    return df
+
+def _clean_excel_str(val):
+    """Nettoie les caractères illégaux pour Excel (openpyxl) : \\x00-\\x08 etc. ne peuvent pas être utilisés dans les worksheets."""
+    if pd.isna(val) or val is None:
+        return val
+    s = str(val)
+    # Supprime les caractères de contrôle illégaux pour openpyxl
+    s = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', s)
+    return s
+
+def to_excel_bytes_agence(df):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Donnees"
+    ws.sheet_view.showGridLines = False
+    bordure = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    cell_alignment = Alignment(vertical='center')
+    nb_colonnes = len(df.columns)
+    nb_lignes = len(df) + 1
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = bordure
+        cell.alignment = header_alignment
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, (col_name, value) in enumerate(zip(df.columns, row), 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if col_name == "N° Police":
+                v = _clean_excel_str(str(value) if pd.notna(value) else "NA")
+                cell.value = v
+                cell.number_format = '@'
+            elif col_name in ["Date Effet", "Date Echeance"]:
+                if pd.notna(value):
+                    cell.value = value
+                    cell.number_format = 'DD/MM/YYYY'
+                else:
+                    cell.value = None
+            else:
+                if pd.isna(value):
+                    cell.value = None
+                else:
+                    cell.value = _clean_excel_str(value)
+            cell.border = bordure
+            cell.alignment = cell_alignment
+    largeurs = {
+        "N° Police": 18, "Intermediaire": 22, "CIN": 12,
+        "Nom/Raison sociale": 25, "Usage": 15, "Immatriculation": 15,
+        "Duree": 8, "Date Effet": 14, "Date Echeance": 14,
+        "Heure Echeance": 14, "Segment": 10, "Risque départ": 13,
+        "Appétence MRH": 14, "Etat": 12, "Telephone": 14
+    }
+    for col_idx, col_name in enumerate(df.columns, 1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = largeurs.get(col_name, 15)
+    ws.freeze_panes = 'A2'
+    derniere_colonne = get_column_letter(nb_colonnes)
+    ws.print_area = f'A1:{derniere_colonne}{nb_lignes}'
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+def creer_zip_agence(fichiers):
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for nom, data in fichiers:
+            zf.writestr(nom, data)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def extraire_code_intermediaire_pour_generation(df, nom_agence=None, code_agence=None):
+    """Extrait le code numerique de base depuis la colonne Intermediaire ou fallback agence.
+    Retourne ex: '5863' ou None si non trouve.
+    """
+    # 1) Essayer colonne Intermediaire (avant nettoyage, on cherche colonne contenant intermediaire/agence)
+    col_inter = None
+    for col in df.columns:
+        low = str(col).lower()
+        if 'intermediaire' in low or 'intermediair' in low or low.strip() in ['agence','interm']:
+            col_inter = col
+            break
+        # aussi nettoyer
+        try:
+            if 'intermediaire' in str(col).strip().lower():
+                col_inter = col
+                break
+        except:
+            pass
+    if col_inter is not None:
+        for val in df[col_inter].dropna().head(5):
+            s = str(val).strip()
+            if not s or s.lower() == 'nan':
+                continue
+            # chercher 4 chiffres consecutifs (ex: 5863, 8057)
+            m = re.search(r'(\d{4,5})', s)
+            if m:
+                return m.group(1)
+            # fallback: tout chiffres
+            digs = re.sub(r'\D', '', s)
+            if len(digs) >= 4:
+                return digs[:4]
+    # 2) Fallback via nom_agence / code_agence
+    if code_agence:
+        digs = re.sub(r'\D', '', str(code_agence))
+        if digs:
+            # prendre les 4 derniers chiffres (ex: A5863 -> 5863)
+            return digs[-4:] if len(digs) >=4 else digs
+    if nom_agence:
+        # essayer de retrouver code via mapping
+        try:
+            _map = get_mapping_agences()
+            for c, n in _map.items():
+                if n == nom_agence:
+                    digs = re.sub(r'\D', '', c)
+                    if digs:
+                        return digs[-4:]
+        except:
+            pass
+    return None
+
+def generer_numeros_police(code_base, n, mois=None, annee=None):
+    """Genere n numeros sequentiels: code_base + MM + YYYY + 00001..."""
+    if mois is None:
+        mois = datetime.now().strftime('%m')
+    if annee is None:
+        annee = datetime.now().strftime('%Y')
+    # s'assurer que code_base est bien 4 chiffres (ou plus)
+    code_base = str(code_base).strip()
+    # enlever tout non-digit
+    code_base = re.sub(r'\D', '', code_base)
+    if not code_base:
+        code_base = '0000'
+    base = f"{code_base}{mois}{annee}"
+    return [f"{base}{i:05d}" for i in range(1, n+1)]
+
+def app_traitement_agence():
+    st.markdown("Téléversez vos fichiers d'agence (Excel, CSV, TSV, .xls déguisé) — détection automatique de l'agence via les 4 premiers chiffres du N° Police.")
+    fichiers_upload = st.file_uploader(
+        "📁 Glissez vos fichiers ici",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        key="agence_uploader"
+    )
+    if fichiers_upload:
+        fichiers_info = []
+        for fichier in fichiers_upload:
+            try:
+                df = lire_fichier_agence(fichier)
+                code, nom, numero, raison_echec = detecter_agence_depuis_police_agence(df)
+                col_date = None
+                for col in df.columns:
+                    if 'date' in str(col).lower():
+                        col_date = col
+                        break
+                format_date = detecter_format_date_agence(df, col_date)
+                # Extraction code intermediaire pour generation N° Police (depuis Intermediaire ou fallback agence)
+                try:
+                    code_base = extraire_code_intermediaire_pour_generation(df, nom, code)
+                except:
+                    code_base = None
+                fichiers_info.append({
+                    'fichier': fichier,
+                    'nom_fichier': fichier.name,
+                    'df': df,
+                    'code': code,
+                    'nom_agence': nom,
+                    'numero': numero,
+                    'format_date': format_date,
+                    'detecte': nom is not None,
+                    'raison_echec': raison_echec,
+                    'code_base': code_base,
+                    'code_base_effectif': code_base
+                })
+            except Exception as e:
+                fichiers_info.append({
+                    'fichier': fichier,
+                    'nom_fichier': fichier.name,
+                    'df': None,
+                    'code': None,
+                    'nom_agence': None,
+                    'numero': None,
+                    'format_date': 'FR',
+                    'detecte': False,
+                    'raison_echec': f"Erreur lecture: {str(e)}",
+                    'code_base': None,
+                    'code_base_effectif': None
+                })
+        detectes = [f for f in fichiers_info if f['detecte']]
+        non_detectes = [f for f in fichiers_info if not f['detecte']]
+        if detectes:
+            st.success(f"✅ **{len(detectes)}** fichier(s) détecté(s) automatiquement")
+            with st.expander("📋 Fichiers détectés", expanded=False):
+                for f in detectes:
+                    st.write(f"• **{f['nom_fichier']}** → {f['nom_agence']} ({f['code']})")
+        if non_detectes:
+            st.warning(f"⚠️ **{len(non_detectes)}** fichier(s) nécessite(nt) une saisie manuelle")
+            st.markdown("### 🔧 Compléter les agences manquantes")
+            for idx, f in enumerate(non_detectes):
+                with st.container():
+                    st.markdown(f"**📄 {f['nom_fichier']}**")
+                    if f['raison_echec']:
+                        st.error(f"❌ **Raison :** {f['raison_echec']}")
+                    if f['df'] is not None:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            code_manuel = st.text_input(
+                                "Code agence (ex: 5180)",
+                                key=f"agence_manuel_{idx}",
+                                placeholder="Tapez le code..."
+                            )
+                        with col2:
+                            selection = st.selectbox(
+                                "Ou choisir dans la liste",
+                                get_liste_agences_dropdown(),
+                                key=f"agence_liste_{idx}"
+                            )
+                        code_final, nom_final = None, None
+                        if code_manuel:
+                            code_final, nom_final = get_nom_agence_from_code(code_manuel)
+                            if nom_final:
+                                st.success(f"✅ Agence trouvée : **{nom_final}**")
+                            else:
+                                st.error("❌ Code non reconnu")
+                        elif selection:
+                            code_final, nom_final = extraire_code_from_dropdown(selection)
+                            if nom_final:
+                                st.success(f"✅ Agence sélectionnée : **{nom_final}**")
+                        f['code'] = code_final
+                        f['nom_agence'] = nom_final
+                        f['detecte'] = nom_final is not None
+                        # Re-extraire code_base apres correction agence
+                        if f['detecte']:
+                            try:
+                                f['code_base'] = extraire_code_intermediaire_pour_generation(f['df'], f['nom_agence'], f['code'])
+                                f['code_base_effectif'] = f['code_base']
+                            except:
+                                pass
+                    st.markdown("---")
+        # === Generation N° Police : extraction et saisie manuelle si besoin ===
+        st.markdown("### 🔢 Génération N° Police (remplace le format scientifique 5,86E+14)")
+        st.caption(f"Format : CODE + MMYYYY + 00001 — ex: 5863 + {datetime.now().strftime('%m%Y')} + 00001 → 5863{datetime.now().strftime('%m%Y')}00001 pour Intermédiaire 5863. Séquentiel par fichier.")
+        mois_courant = datetime.now().strftime('%m')
+        annee_courante = datetime.now().strftime('%Y')
+        st.info(f"📅 Mois/Année en cours utilisés : **{mois_courant}/{annee_courante}** — base : CODE + {mois_courant}{annee_courante} + 00001 (ex: 5863{mois_courant}{annee_courante}00001, 5863{mois_courant}{annee_courante}00002 …)")
+        # Pour chaque fichier valide, permettre verification / correction du code base
+        for idx2, f in enumerate([x for x in fichiers_info if x['df'] is not None]):
+            # Re-essayer extraction si vide ou si agence a ete corrigee
+            if not f.get('code_base_effectif'):
+                try:
+                    f['code_base'] = extraire_code_intermediaire_pour_generation(f['df'], f.get('nom_agence'), f.get('code'))
+                    f['code_base_effectif'] = f['code_base']
+                except:
+                    f['code_base'] = None
+                    f['code_base_effectif'] = None
+            code_base_auto = f.get('code_base')
+            with st.container():
+                col_g1, col_g2, col_g3 = st.columns([2, 2, 3])
+                with col_g1:
+                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}*")
+                    if code_base_auto:
+                        st.success(f"Code extrait : **{code_base_auto}** → ex: {code_base_auto}{mois_courant}{annee_courante}00001")
+                    else:
+                        st.warning("⚠️ Code Intermédiaire non trouvé (colonne Intermediaire vide ou illisible)")
+                with col_g2:
+                    key_manual = f"agence_codebase_{idx2}_{f['nom_fichier']}"
+                    val_manual = st.text_input(
+                        "Code base manuel (4 chiffres, ex: 5863) — laisser vide pour garder auto",
+                        value="",
+                        placeholder=code_base_auto or "Ex: 5863",
+                        key=key_manual,
+                        help="Si l'extraction a échoué ou vous voulez forcer un autre code, tapez ici les 4 chiffres"
+                    )
+                    if val_manual.strip():
+                        digits = re.sub(r'\D','', val_manual.strip())
+                        if digits:
+                            f['code_base_effectif'] = digits[:4] if len(digits)>=4 else digits
+                            st.caption(f"→ Effectif manuel : **{f['code_base_effectif']}**")
+                        else:
+                            st.error("Code invalide (chiffres requis)")
+                            f['code_base_effectif'] = None
+                    else:
+                        f['code_base_effectif'] = code_base_auto
+                with col_g3:
+                    eff = f.get('code_base_effectif')
+                    n = len(f['df'])
+                    if eff:
+                        preview = generer_numeros_police(eff, min(2, n), mois_courant, annee_courante)
+                        st.code(" → ".join(preview) + (f" … +{n-2} autres" if n>2 else ""), language=None)
+                        st.caption(f"{n} lignes → de {eff}{mois_courant}{annee_courante}00001 à {eff}{mois_courant}{annee_courante}{n:05d}")
+                    else:
+                        st.error("Aucun code → génération impossible — saisissez manuel")
+                st.markdown("---")
+        fichiers_valides = [f for f in fichiers_info if f['df'] is not None]
+        # Tous prêts si agence ok ET code_base_effectif ok
+        tous_prets = all((f['detecte'] or f['nom_agence']) and f.get('code_base_effectif') for f in fichiers_valides)
+        st.markdown("### 🚀 Traitement")
+        if not fichiers_valides:
+            st.error("❌ Aucun fichier valide")
+        elif not tous_prets:
+            # Message plus precis
+            manques = [f['nom_fichier'] for f in fichiers_valides if not (f['detecte'] or f['nom_agence']) or not f.get('code_base_effectif')]
+            st.warning(f"ℹ️ Complétez les agences / codes manquants : {', '.join(manques[:3])}")
+            # Detail
+            for f in fichiers_valides:
+                if not f.get('code_base_effectif'):
+                    st.info(f"📄 {f['nom_fichier']} : saisissez le Code base Intermédiaire (ex: 5863) ci-dessus")
+        if st.button("Lancer le traitement", type="primary", disabled=not tous_prets or not fichiers_valides, use_container_width=True, key="agence_lancer"):
+            fichiers_traites = []
+            resultats = []
+            progress = st.progress(0)
+            # mois/annee en cours pour generation (deja calcule plus haut, on recalcule pour securite)
+            _mois_c = datetime.now().strftime('%m')
+            _annee_c = datetime.now().strftime('%Y')
+            for idx, f in enumerate(fichiers_info):
+                if f['df'] is not None and f['nom_agence'] and f.get('code_base_effectif'):
+                    try:
+                        df_traite = traiter_fichier_agence(f['df'].copy(), f['nom_agence'], f['format_date'], f['code_base_effectif'], _mois_c, _annee_c)
+                        mois = detecter_mois_echeance_agence(f['df'], f['format_date'])
+                        # Le nom de sortie garde le mois d'echeance detecte, mais le N° Police utilise mois/annee en cours
+                        nom_sortie = f"ASSURCALL_{nettoyer_nom_fichier_agence(f['nom_agence'])}_{mois}.xlsx"
+                        excel_bytes = to_excel_bytes_agence(df_traite)
+                        fichiers_traites.append((nom_sortie, excel_bytes))
+                        resultats.append({
+                            "Source": f['nom_fichier'],
+                            "Agence": f['nom_agence'],
+                            "Lignes": len(df_traite),
+                            "Sortie": nom_sortie,
+                            "Statut": "✅ OK"
+                        })
+                    except Exception as e:
+                        resultats.append({
+                            "Source": f['nom_fichier'],
+                            "Agence": f['nom_agence'] or "-",
+                            "Lignes": 0,
+                            "Sortie": "-",
+                            "Statut": f"❌ {e}"
+                        })
+                elif f['df'] is None:
+                    resultats.append({
+                        "Source": f['nom_fichier'],
+                        "Agence": "-",
+                        "Lignes": 0,
+                        "Sortie": "-",
+                        "Statut": f"❌ {f['raison_echec']}"
+                    })
+                progress.progress((idx + 1) / len(fichiers_info))
+            st.markdown("---")
+            st.subheader("📊 Résumé")
+            st.dataframe(pd.DataFrame(resultats), use_container_width=True, hide_index=True)
+            if fichiers_traites:
+                st.markdown("---")
+                st.subheader("💾 Téléchargement")
+                if len(fichiers_traites) == 1:
+                    nom, data = fichiers_traites[0]
+                    st.download_button(
+                        f"📥 Télécharger {nom}",
+                        data=data,
+                        file_name=nom,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True,
+                        key="agence_dl_single"
+                    )
+                else:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers)",
+                            data=creer_zip_agence(fichiers_traites),
+                            file_name=f"ASSURCALL_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                            mime="application/zip",
+                            type="primary",
+                            use_container_width=True,
+                            key="agence_dl_zip"
+                        )
+                    with col2:
+                        st.info("Téléchargements individuels ↓")
+                    for i, (nom, data) in enumerate(fichiers_traites):
+                        st.download_button(
+                            f"📥 {nom}",
+                            data=data,
+                            file_name=nom,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"agence_dl_{i}"
+                        )
+    # =========================
+    # GESTION MAPPING AGENCES - Recherche / Ajout / Import / Suppression
+    # =========================
+    st.markdown("---")
+    with st.expander("⚙️ Gestion MAPPING Agences — Recherche / Ajout / Import / Export / Suppression", expanded=False):
+        _mapping_curr = get_mapping_agences()
+        col_m1, col_m2, col_m3 = st.columns([2, 1, 1])
+        with col_m1:
+            st.metric("Agences référencées", len(_mapping_curr))
+        with col_m2:
+            _export_df = pd.DataFrame([{"CODE": k, "NOM": v} for k, v in sorted(_mapping_curr.items())])
+            _export_buf = BytesIO()
+            with pd.ExcelWriter(_export_buf, engine="xlsxwriter") as writer:
+                _export_df.to_excel(writer, index=False, sheet_name="mapping")
+            _export_buf.seek(0)
+            st.download_button(
+                "📥 Exporter mapping (Excel)",
+                data=_export_buf.getvalue(),
+                file_name=f"mapping_agences_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="agence_export_mapping"
+            )
+        with col_m3:
+            if st.button("🔄 Recharger défaut", key="agence_reset_default", help="Restaure le mapping par défaut (écrase les modifs)"):
+                _sync_mapping_globals(MAPPING_AGENCES_DEFAULT.copy())
+                st.success("Mapping restauré par défaut")
+                st.rerun()
+
+        st.markdown("#### 🔍 Recherche agence (par code ou nom)")
+        rech = st.text_input("🔍 Recherche nom ou code", placeholder="Ex: ALWATA, 5180, B8057, SRAGHNA…", key="agence_recherche_v2")
+        if rech:
+            _rech_lower = rech.lower().strip()
+            res = [(c, n) for c, n in _mapping_curr.items() if _rech_lower in n.lower() or _rech_lower in c.lower()]
+            st.caption(f"{len(res)} résultat(s) pour '{rech}'")
+            if res:
+                _res_display = res[:50]
+                for _code, _nom in _res_display:
+                    cc1, cc2, cc3 = st.columns([3, 4, 1])
+                    with cc1:
+                        st.code(_code, language=None)
+                    with cc2:
+                        st.write(_nom)
+                    with cc3:
+                        if st.button("🗑️", key=f"agence_del_{_code}", help=f"Supprimer {_code}"):
+                            new_map = _mapping_curr.copy()
+                            new_map.pop(_code, None)
+                            _sync_mapping_globals(new_map)
+                            st.success(f"Agence {_code} supprimée")
+                            st.rerun()
+                if len(res) > 50:
+                    st.info(f"… et {len(res)-50} autres (affinez la recherche)")
+                # CSV export filtré simple et fiable
+                _filt_df = pd.DataFrame([{"CODE": c, "NOM": n} for c, n in res])
+                _csv_buf = _filt_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📥 Télécharger résultats filtrés (CSV)",
+                    data=_csv_buf,
+                    file_name="recherche_agences.csv",
+                    mime="text/csv",
+                    key="agence_dl_filt"
+                )
+            else:
+                st.warning("Aucun résultat — vérifiez l'orthographe ou le code")
+        else:
+            with st.expander("👀 Aperçu des 10 premières agences", expanded=False):
+                for c, n in list(sorted(_mapping_curr.items()))[:10]:
+                    st.code(f"{c} → {n}")
+
+        st.markdown("---")
+        st.markdown("#### ➕ Ajouter / Mettre à jour une agence")
+        with st.form("agence_add_form", clear_on_submit=True):
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                new_code = st.text_input("Code agence", placeholder="Ex: AGENT_A9999 ou BGD_B9999", key="agence_add_code")
+            with col_a2:
+                new_nom = st.text_input("Nom agence", placeholder="Ex: NOUVELLE AGENCE CASA", key="agence_add_nom")
+            submitted = st.form_submit_button("✅ Ajouter / Mettre à jour", type="primary", use_container_width=True)
+            if submitted:
+                if not new_code or not new_nom:
+                    st.error("Code et Nom sont obligatoires")
+                else:
+                    _c = new_code.strip().upper()
+                    _n = new_nom.strip()
+                    if _c.isdigit():
+                        _c = f"AGENT_A{_c}"
+                    new_map = _mapping_curr.copy()
+                    is_update = _c in new_map
+                    new_map[_c] = _n
+                    _sync_mapping_globals(new_map)
+                    st.success(f"{'Mise à jour' if is_update else 'Ajout'} : {_c} → {_n}")
+                    st.rerun()
+        st.markdown("---")
+        st.markdown("#### 📤 Mettre à jour le mapping par fichier (Excel/CSV)")
+        st.caption("À chaque fois que tu veux mettre à jour le MAPPING, upload un nouveau fichier. Colonnes attendues : **CODE** et **NOM** (ou 2 colonnes sans en-tête).")
+        col_u1, col_u2 = st.columns(2)
+        with col_u1:
+            up_mapping = st.file_uploader(
+                "Choisir fichier mapping",
+                type=["xlsx", "xls", "csv"],
+                key="agence_upload_mapping",
+                help="Excel avec colonnes CODE | NOM ou CSV"
+            )
+        with col_u2:
+            mode_import = st.radio(
+                "Mode d'import",
+                ("Ajouter / Mettre à jour (upsert)", "Remplacer tout le mapping"),
+                key="agence_mode_import",
+                horizontal=False
+            )
+        if up_mapping is not None:
+            try:
+                _fname = up_mapping.name.lower()
+                if _fname.endswith(".csv"):
+                    try:
+                        _txt = up_mapping.getvalue().decode("utf-8")
+                    except:
+                        _txt = up_mapping.getvalue().decode("latin-1")
+                    _first = _txt.split("\n")[0]
+                    _sep = ";" if ";" in _first else ("," if "," in _first else "\t")
+                    if _sep == "\t":
+                        _sep = "\t"
+                    _df_map = pd.read_csv(StringIO(_txt), dtype=str, sep=_sep)
+                else:
+                    _df_map = pd.read_excel(BytesIO(up_mapping.getvalue()), dtype=str)
+
+                st.write("Aperçu du fichier uploadé :")
+                st.dataframe(_df_map.head(), use_container_width=True)
+
+                _cols_lower = {str(c).strip().lower(): c for c in _df_map.columns}
+                _col_code = None
+                _col_nom = None
+                for k, v in _cols_lower.items():
+                    if k in ["code", "code_agence", "code agence", "agence_code", "id"]:
+                        _col_code = v
+                    if k in ["nom", "nom_agence", "nom agence", "libelle", "libellé", "agence", "raison sociale"]:
+                        _col_nom = v
+                if _col_code is None or _col_nom is None:
+                    if len(_df_map.columns) >= 2:
+                        _col_code = _df_map.columns[0]
+                        _col_nom = _df_map.columns[1]
+                    else:
+                        raise Exception("Fichier doit avoir au moins 2 colonnes (CODE, NOM)")
+
+                _new_entries = {}
+                for _, row in _df_map.iterrows():
+                    _c = str(row[_col_code]).strip().upper() if pd.notna(row[_col_code]) else ""
+                    _n = str(row[_col_nom]).strip() if pd.notna(row[_col_nom]) else ""
+                    if not _c or _c.lower() == "nan" or not _n or _n.lower() == "nan":
+                        continue
+                    if _c.isdigit():
+                        _c = f"AGENT_A{_c}"
+                    _new_entries[_c] = _n
+
+                st.info(f"{len(_new_entries)} agence(s) détectée(s) dans le fichier")
+                if st.button(f"✅ Confirmer import ({len(_new_entries)} agences) - {mode_import}", key="agence_confirm_import", type="primary"):
+                    if mode_import == "Remplacer tout le mapping":
+                        final_map = _new_entries
+                    else:
+                        final_map = _mapping_curr.copy()
+                        final_map.update(_new_entries)
+                    _sync_mapping_globals(final_map)
+                    st.success(f"Mapping mis à jour ! Total maintenant : {len(final_map)} agences")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Erreur lecture fichier mapping : {e}")
+
+        st.markdown("---")
+        st.markdown("#### 🗑️ Suppression en masse / gestion")
+        with st.expander("Supprimer plusieurs agences d'un coup", expanded=False):
+            st.caption("Collez une liste de codes séparés par virgule, espace ou saut de ligne")
+            txt_codes = st.text_area("Codes à supprimer", placeholder="Ex: AGENT_A5180, BGD_B8057\nA6666", key="agence_bulk_del")
+            if st.button("🗑️ Supprimer la liste", key="agence_bulk_del_btn", type="secondary"):
+                if txt_codes.strip():
+                    import re as _re
+                    _codes_raw = _re.split(r"[\s,;]+", txt_codes.strip())
+                    _codes_norm = []
+                    for _c in _codes_raw:
+                        _c = _c.strip().upper()
+                        if not _c:
+                            continue
+                        if _c.isdigit():
+                            _num2c = get_mapping_numero_vers_code()
+                            if _c in _num2c:
+                                _c = _num2c[_c]
+                            else:
+                                _c = f"AGENT_A{_c}"
+                        _codes_norm.append(_c)
+                    new_map = _mapping_curr.copy()
+                    removed = 0
+                    not_found = []
+                    for _c in _codes_norm:
+                        if _c in new_map:
+                            new_map.pop(_c)
+                            removed += 1
+                        else:
+                            not_found.append(_c)
+                    _sync_mapping_globals(new_map)
+                    st.success(f"{removed} agence(s) supprimée(s)")
+                    if not_found:
+                        st.warning(f"Non trouvés : {', '.join(not_found[:10])}")
+                    st.rerun()
+                else:
+                    st.error("Liste vide")
+
+        st.markdown("**📂 Formats supportés traitement :** Excel (.xlsx), Excel ancien (.xls), CSV / TSV, Fichiers texte déguisés")
+        st.caption("Version 11.0 | Traitement Agence — Mapping dynamique persistant (mapping_agences.json)")
 
 
 # ==============================
@@ -1490,6 +2750,7 @@ app_choice = st.sidebar.radio(
     "Choisir l'application :",
     (
         "EQDOM_MARKETING",
+        "TRAITEMENT_AGENCE",
         "BOA_MARKETING",
         "BOA_REPORT_GENERATOR",
     ),
@@ -1499,6 +2760,9 @@ app_choice = st.sidebar.radio(
 if app_choice == "EQDOM_MARKETING":
     app_hero("EQDOM · Marketing", "Normalisation & déduplication de fichiers Excel marketing")
     app_eqdom_marketing()
+elif app_choice == "TRAITEMENT_AGENCE":
+    app_hero("Traitement Fichiers Agence", "Détection automatique agence & mise en forme ASSURCALL")
+    app_traitement_agence()
 elif app_choice == "BOA_MARKETING":
     app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")
     app_avt_to_apt()

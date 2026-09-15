@@ -956,44 +956,79 @@ def lire_fichier_agence(fichier):
     if contenu.startswith(b'PK'):
         return pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl')
     elif contenu.startswith(b'\xd0\xcf\x11\xe0'):
-        # Vrai fichier .xls OLE - nécessite xlrd
+        # Vrai fichier .xls OLE - essais multiples (xlrd → calamine → openpyxl → HTML)
+        _errs = []
         try:
             return pd.read_excel(BytesIO(contenu), dtype=str, engine='xlrd')
         except ImportError as e:
-            # xlrd non installé - fallback texte déguisé
-            try:
-                try:
-                    texte = contenu.decode('utf-8')
-                except:
-                    texte = contenu.decode('latin-1')
-                if '\t' in texte[:2000] or '\n' in texte[:2000]:
-                    premiere_ligne = texte.split('\n')[0]
-                    if '\t' in premiere_ligne:
-                        return pd.read_csv(StringIO(texte), dtype=str, sep='\t')
-                    elif ';' in premiere_ligne:
-                        return pd.read_csv(StringIO(texte), dtype=str, sep=';')
-                    elif ',' in premiere_ligne:
-                        return pd.read_csv(StringIO(texte), dtype=str, sep=',')
-                try:
-                    return pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl')
-                except:
-                    pass
-            except:
-                pass
-            raise Exception(f"Import xlrd manquant. Installez xlrd ≥ 2.0.1 via 'pip install xlrd' pour lire les fichiers .xls anciens. Erreur d'origine: {e}")
+            _errs.append(f"xlrd manquant: {e}")
         except Exception as e:
-            if 'xlrd' in str(e).lower() or 'Import' in str(e):
-                raise
+            # Corruption type seen[2]==4 ou autre -> on continue avec fallbacks, pas raise direct
+            _errs.append(f"xlrd: {e}")
+        # 2. calamine (gère mieux les xls corrompus/spéciaux)
+        try:
+            return pd.read_excel(BytesIO(contenu), dtype=str, engine='calamine')
+        except ImportError as e:
+            _errs.append(f"calamine manquant: {e}")
+        except Exception as e:
+            _errs.append(f"calamine: {e}")
+        # 3. openpyxl (au cas où mal détecté)
+        try:
+            return pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl')
+        except Exception as e:
+            _errs.append(f"openpyxl: {str(e)[:120]}")
+        # 4. HTML déguisé (beaucoup d'exports .xls sont des tableaux HTML)
+        try:
             try:
-                return pd.read_excel(BytesIO(contenu), dtype=str)
-            except Exception as e2:
-                raise Exception(f"Erreur lecture xls OLE: {e2} (xlrd requis)")
+                _txt = contenu.decode('utf-8', errors='ignore')
+            except:
+                _txt = contenu.decode('latin-1', errors='ignore')
+            if '<table' in _txt.lower() or '<html' in _txt.lower():
+                try:
+                    _tables = pd.read_html(StringIO(_txt), flavor='lxml')
+                except:
+                    _tables = pd.read_html(StringIO(_txt))
+                if _tables:
+                    _df = _tables[0].astype(str)
+                    # Nettoyer les 'nan' issus du cast
+                    _df = _df.replace({'nan': None, 'None': None, 'NaT': None})
+                    return _df
+        except Exception as e:
+            _errs.append(f"html: {str(e)[:120]}")
+        # 5. Texte brut (TSV/CSV avec header OLE bizarre)
+        try:
+            try:
+                _txt2 = contenu.decode('utf-8', errors='ignore')
+            except:
+                _txt2 = contenu.decode('latin-1', errors='ignore')
+            if '\t' in _txt2[:2000] or ';' in _txt2[:2000]:
+                _first = _txt2.split('\n')[0]
+                if '\t' in _first:
+                    return pd.read_csv(StringIO(_txt2), dtype=str, sep='\t')
+                elif ';' in _first:
+                    return pd.read_csv(StringIO(_txt2), dtype=str, sep=';')
+        except Exception as e:
+            _errs.append(f"texte: {str(e)[:120]}")
+        raise Exception(f"Erreur lecture xls OLE (fichier corrompu ou format special, ex: seen[2]==4). Essais: {' | '.join(_errs[:4])}. Astuce: ouvrez-le dans Excel -> Enregistrer sous .xlsx puis reuploadez.")
     else:
         try:
             try:
-                texte = contenu.decode('utf-8')
+                texte = contenu.decode('utf-8', errors='ignore')
             except:
-                texte = contenu.decode('latin-1')
+                texte = contenu.decode('latin-1', errors='ignore')
+            # HTML deguise (export .xls en tableau HTML sans header OLE)
+            if '<table' in texte.lower()[:5000] or '<html' in texte.lower()[:5000]:
+                try:
+                    try:
+                        _tables = pd.read_html(StringIO(texte), flavor='lxml')
+                    except:
+                        _tables = pd.read_html(StringIO(texte))
+                    if _tables:
+                        _dfh = _tables[0].astype(str)
+                        _dfh = _dfh.replace({'nan': None, 'None': None, 'NaT': None})
+                        return _dfh
+                except:
+                    pass
             premiere_ligne = texte.split('\n')[0]
             if '\t' in premiere_ligne:
                 return pd.read_csv(StringIO(texte), dtype=str, sep='\t')

@@ -1752,87 +1752,126 @@ def app_traitement_agence():
         st.info(f"📅 Mois/Année en cours pour génération : **{mois_courant}/{annee_courante}**")
         # Pour chaque fichier valide : compter combien à régénérer vs déjà corrects (+ cas double code)
         for idx2, f in enumerate([x for x in fichiers_info if x['df'] is not None]):
-            _is_double = bool(f.get('double_code') and f.get('nouveau_code'))
-            if _is_double:
-                # Double code : tout régénérer à partir du nouveau code (gado a 0)
-                _nb_invalid = len(f['df'])
-                _nb_ok = 0
-                f['code_base'] = f.get('nouveau_code')
-                f['code_base_effectif'] = f.get('nouveau_code')
-            else:
-                # Compter N° Police scientifiques/vides dans le fichier brut
-                try:
-                    _col_pol = trouver_colonne_police_agence(f['df'])
-                    if _col_pol is not None:
-                        _nb_invalid = int(f['df'][_col_pol].apply(est_police_scientifique_ou_vide).sum())
-                    else:
-                        _nb_invalid = len(f['df'])
-                    _nb_ok = len(f['df']) - _nb_invalid
-                except:
-                    _nb_invalid = 0
-                    _nb_ok = len(f['df'])
-            f['nb_a_regenerer'] = _nb_invalid
-            f['nb_deja_ok'] = _nb_ok
-            f['force_regenerer'] = _is_double
-            # Re-essayer extraction code base seulement si besoin (il y a des invalides)
-            if _nb_invalid > 0 and not f.get('code_base_effectif'):
+            _is_double_auto = bool(f.get('double_code') and f.get('nouveau_code'))
+            # Compter N° scientifiques/vides (base)
+            try:
+                _col_pol = trouver_colonne_police_agence(f['df'])
+                if _col_pol is not None:
+                    _nb_invalid_auto = int(f['df'][_col_pol].apply(est_police_scientifique_ou_vide).sum())
+                else:
+                    _nb_invalid_auto = len(f['df'])
+            except:
+                _col_pol = None
+                _nb_invalid_auto = 0
+            _nb_ok_auto = len(f['df']) - _nb_invalid_auto
+            # Re-essayer extraction code base si besoin
+            if not f.get('code_base_effectif'):
                 try:
                     f['code_base'] = extraire_code_intermediaire_pour_generation(f['df'], f.get('nom_agence'), f.get('code'))
                     f['code_base_effectif'] = f['code_base']
                 except:
-                    f['code_base'] = None
-                    f['code_base_effectif'] = None
+                    pass
             code_base_auto = f.get('code_base')
             with st.container():
-                if f.get('double_code') and f.get('nouveau_code'):
+                if _is_double_auto:
                     _det = f.get('double_details', {}) or {}
                     _cols_txt = ', '.join(_det.get('colonnes_candidates', [])[:3])
                     st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — 🔀 Double code détecté (ancien+nouveau) [{_cols_txt}] → nouveau **{f.get('nouveau_code')}**, régénération totale dès 00001")
+                    f['code_base'] = f.get('nouveau_code')
+                    f['code_base_effectif'] = f.get('nouveau_code')
+                    f['nb_a_regenerer'] = len(f['df'])
+                    f['nb_deja_ok'] = 0
+                    f['force_regenerer'] = True
+                    _eff2 = f.get('code_base_effectif')
+                    if _eff2:
+                        _prev2 = generer_numeros_police(_eff2, min(2, len(f['df'])), mois_courant, annee_courante)
+                        st.code(" → ".join(_prev2) + (f" … +{len(f['df'])-2} autres (total {len(f['df'])})" if len(f['df'])>2 else ""), language=None)
+                        st.caption(f"Tout sera régénéré depuis {_eff2} (ancien effacé). Intermediaire et reste inchangés.")
                 else:
-                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok} déjà m9ada / 🔄 {_nb_invalid} à générer")
-                if _nb_invalid == 0:
-                    st.success("Tous les N° Police déjà corrects — conservés, pas de génération nécessaire.")
-                    # Montrer exemple de valeurs gardées
-                    try:
-                        _ex = f['df'][_col_pol].dropna().head(2).tolist() if _col_pol is not None else []
-                        if _ex:
-                            st.code("Ex conservés : " + " → ".join([str(x)[:20] for x in _ex]), language=None)
-                    except:
-                        pass
-                else:
-                    col_g1, col_g2, col_g3 = st.columns([2, 2, 3])
-                    with col_g1:
-                        if code_base_auto:
-                            st.success(f"Code extrait : **{code_base_auto}** → ex: {code_base_auto}{mois_courant}{annee_courante}00001")
-                        else:
-                            st.warning("⚠️ Code Intermédiaire non trouvé (colonne Intermediaire vide ou illisible)")
-                    with col_g2:
-                        key_manual = f"agence_codebase_{idx2}_{f['nom_fichier']}"
-                        val_manual = st.text_input(
-                            "Code base manuel (4 chiffres, ex: 5863) — laisser vide pour garder auto",
+                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok_auto} déjà m9ada / 🔄 {_nb_invalid_auto} à générer")
+                    # Option manuelle pour forcer (cas double non détecté auto)
+                    _force_key = f"force_regen_{idx2}_{f['nom_fichier']}"
+                    _force_checked = st.checkbox(
+                        "🔀 Forcer régénération totale dès 00001 (cas ancien+nouveau non détecté)",
+                        value=False,
+                        key=_force_key,
+                        help="Cochez pour effacer tous les anciens N° Police et régénérer depuis le nouveau code, même si déjà m9ada."
+                    )
+                    if _force_checked:
+                        _nouv_key = f"nouveau_code_{idx2}_{f['nom_fichier']}"
+                        _nouv_man = st.text_input(
+                            "Nouveau code (4 chiffres, ex: 8009) — régénération totale",
                             value="",
-                            placeholder=code_base_auto or "Ex: 5863",
-                            key=key_manual,
-                            help="Seulement pour les N° scientifiques/vides. Tapez ici les 4 chiffres si besoin."
+                            placeholder=code_base_auto or "Ex: 8009",
+                            key=_nouv_key,
+                            help="Tapez le nouveau code agence. Tous les N° Police seront effacés et régénérés depuis ce code."
                         )
-                        if val_manual.strip():
-                            digits = re.sub(r'\D','', val_manual.strip())
-                            if digits:
-                                f['code_base_effectif'] = digits[:4] if len(digits)>=4 else digits
-                                st.caption(f"→ Effectif manuel : **{f['code_base_effectif']}**")
-                            else:
-                                st.error("Code invalide (chiffres requis)")
-                                f['code_base_effectif'] = None
+                        if _nouv_man.strip():
+                            _dg = re.sub(r'\D', '', _nouv_man.strip())
+                            _eff_man = (_dg[:4] if len(_dg) >= 4 else _dg) if _dg else None
                         else:
-                            f['code_base_effectif'] = code_base_auto
-                    with col_g3:
-                        eff = f.get('code_base_effectif')
-                        if eff:
-                            preview = generer_numeros_police(eff, min(2, _nb_invalid), mois_courant, annee_courante)
-                            st.code(" → ".join(preview) + (f" … +{_nb_invalid-2} autres à générer" if _nb_invalid>2 else ""), language=None)
-                            st.caption(f"{_nb_invalid} à générer (sur {len(f['df'])}), {_nb_ok} gardés tels quels.")
+                            _eff_man = code_base_auto
+                        if _eff_man:
+                            f['code_base_effectif'] = _eff_man
+                            f['nb_a_regenerer'] = len(f['df'])
+                            f['nb_deja_ok'] = 0
+                            f['force_regenerer'] = True
+                            _prevf = generer_numeros_police(_eff_man, min(2, len(f['df'])), mois_courant, annee_courante)
+                            st.code(" → ".join(_prevf) + (f" … +{len(f['df'])-2} autres (total {len(f['df'])})" if len(f['df'])>2 else ""), language=None)
+                            st.caption(f"Tout sera régénéré depuis {_eff_man} (ancien effacé).")
                         else:
-                            st.error("Aucun code → génération impossible — saisissez manuel")
+                            f['nb_a_regenerer'] = len(f['df'])
+                            f['nb_deja_ok'] = 0
+                            f['force_regenerer'] = True
+                            f['code_base_effectif'] = None
+                            st.error("Saisissez le nouveau code pour forcer la régénération.")
+                    else:
+                        f['nb_a_regenerer'] = _nb_invalid_auto
+                        f['nb_deja_ok'] = _nb_ok_auto
+                        f['force_regenerer'] = False
+                        if _nb_invalid_auto == 0:
+                            st.success("Tous les N° Police déjà corrects — conservés, pas de génération nécessaire.")
+                            try:
+                                _ex = f['df'][_col_pol].dropna().head(2).tolist() if _col_pol is not None else []
+                                if _ex:
+                                    st.code("Ex conservés : " + " → ".join([str(x)[:20] for x in _ex]), language=None)
+                            except:
+                                pass
+                            st.caption("Si c'est un cas ancien+nouveau, cochez la case ci-dessus pour tout régénérer.")
+                        else:
+                            col_g1, col_g2, col_g3 = st.columns([2, 2, 3])
+                            with col_g1:
+                                if code_base_auto:
+                                    st.success(f"Code extrait : **{code_base_auto}** → ex: {code_base_auto}{mois_courant}{annee_courante}00001")
+                                else:
+                                    st.warning("⚠️ Code Intermédiaire non trouvé (colonne Intermediaire vide ou illisible)")
+                            with col_g2:
+                                key_manual = f"agence_codebase_{idx2}_{f['nom_fichier']}"
+                                val_manual = st.text_input(
+                                    "Code base manuel (4 chiffres, ex: 5863) — laisser vide pour garder auto",
+                                    value="",
+                                    placeholder=code_base_auto or "Ex: 5863",
+                                    key=key_manual,
+                                    help="Seulement pour les N° scientifiques/vides. Tapez ici les 4 chiffres si besoin."
+                                )
+                                if val_manual.strip():
+                                    digits = re.sub(r'\D','', val_manual.strip())
+                                    if digits:
+                                        f['code_base_effectif'] = digits[:4] if len(digits)>=4 else digits
+                                        st.caption(f"→ Effectif manuel : **{f['code_base_effectif']}**")
+                                    else:
+                                        st.error("Code invalide (chiffres requis)")
+                                        f['code_base_effectif'] = None
+                                else:
+                                    f['code_base_effectif'] = code_base_auto
+                            with col_g3:
+                                eff = f.get('code_base_effectif')
+                                if eff:
+                                    preview = generer_numeros_police(eff, min(2, _nb_invalid_auto), mois_courant, annee_courante)
+                                    st.code(" → ".join(preview) + (f" … +{_nb_invalid_auto-2} autres à générer" if _nb_invalid_auto>2 else ""), language=None)
+                                    st.caption(f"{_nb_invalid_auto} à générer (sur {len(f['df'])}), {_nb_ok_auto} gardés tels quels.")
+                                else:
+                                    st.error("Aucun code → génération impossible — saisissez manuel")
                 st.markdown("---")
         fichiers_valides = [f for f in fichiers_info if f['df'] is not None]
         # Tous prêts si agence ok ET (pas de génération nécessaire OU code_base ok)

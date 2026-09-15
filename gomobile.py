@@ -1526,16 +1526,30 @@ def analyser_double_code_agence(df):
         if len(_cols_avec_quelconque) < 2:
             return False, None, {'colonnes_candidates': [str(c) for c in _cands]}
         _cols_avec_codes = _cols_avec_quelconque
-    # Nouveau = DERNIERE colonne dédiée (pas Intermediaire générique qui écrase le nouveau)
-    # Dédiée = header contient 'code'/'ancien'/'nouveau'/'new'/'old'
+    # Nouveau = DERNIERE colonne dédiée UNIQUEMENT (jamais Intermediaire générique -> nominations proches = erreur).
+    # Dédiée = header contient 'code'/'ancien'/'nouveau'/'new'/'old'. Intermediaire générique exclu d'office.
     def _is_dediee(col):
         try:
             _cl = nettoyer_colonne_agence(col)
         except:
             _cl = str(col).lower()
         return any(k in _cl for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])
+    def _is_intermediaire_generique(col):
+        try:
+            _cl = nettoyer_colonne_agence(col)
+        except:
+            _cl = str(col).lower()
+        _low = str(col).lower()
+        return ('intermediaire' in _cl or 'intermediaire' in _low or 'intermediair' in _low or _cl in ['agence', 'interm'])
     _dediees = [c for c in _cols_avec_codes if _is_dediee(c)]
-    _cols_nouveau = _dediees if _dediees else _cols_avec_codes
+    if _dediees:
+        _cols_nouveau = _dediees
+    else:
+        # Aucune dédiée : exclure Intermediaire générique (sinon nomination proche = faux nouveau)
+        _non_generiques = [c for c in _cols_avec_codes if not _is_intermediaire_generique(c)]
+        if not _non_generiques:
+            return False, None, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'raison': 'que Intermediaire, pas de colonne nouveau dediee'}
+        _cols_nouveau = _non_generiques
     # Cas 1 dédiée + générique avec codes différents (ancien en Intermediaire, nouveau en Code) -> double aussi
     if len(_dediees) == 1 and len(_cols_avec_codes) >= 2:
         pass  # on garde _cols_nouveau = dédiée (nouveau), Intermediaire ignoré pour le choix
@@ -1823,11 +1837,22 @@ def app_traitement_agence():
                                     _pol_codes.add(_m4.group(1)[:4])
                             _pol_hors = [c for c in _pol_codes if c not in _num2c_now]
                             if _pol_hors:
-                                # Ancien code (dans police) absent du mapping, mais un autre code du fichier y est → forcer vers le nouveau
+                                # Ancien code (dans police) absent du mapping → nouveau depuis colonnes DEDIEES uniquement (jamais Intermediaire générique)
                                 _cands_now = []
                                 for _cc in f['df'].columns:
                                     if _cc == _col_pol2:
                                         continue
+                                    try:
+                                        _ccl = nettoyer_colonne_agence(_cc)
+                                    except:
+                                        _ccl = str(_cc).lower()
+                                    _cclow = str(_cc).lower()
+                                    _is_ded = any(k in _ccl for k in ['code', 'ancien', 'nouveau', 'nouv', 'old', 'new'])
+                                    _is_gen = ('intermediaire' in _ccl or 'intermediaire' in _cclow or 'intermediair' in _cclow or _ccl in ['agence', 'interm'])
+                                    if _is_gen and not _is_ded:
+                                        continue  # Intermediaire générique exclu (nominations proches = erreur)
+                                    if not _is_ded:
+                                        continue  # Seulement colonnes dédiées ancien/nouveau/code
                                     try:
                                         for _vv in f['df'][_cc].dropna().head(20):
                                             _mm = re.search(r'(\d{4})', str(_vv))

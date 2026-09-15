@@ -2372,6 +2372,18 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             # Date du ZIP = date des fichiers source (1er OUT_REPORT), pas la date du jour
             batch_date_compact = None
 
+            # Première passe : récupérer la date de référence depuis les OUT_REPORT non vides
+            reference_date_compact = None
+            for c in ready:
+                out_report_rows = parse_out_report(c['report_content'])
+                if out_report_rows:
+                    reference_date_compact = out_report_rows[0]['dateGeneration'].replace('.', '')
+                    break
+            
+            # Fallback : si tous les OUT_REPORT sont vides, utiliser la date du jour
+            if reference_date_compact is None:
+                reference_date_compact = datetime.now().strftime('%Y%m%d')
+
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for c in ready:
                     prefix = c['prefix']
@@ -2379,11 +2391,11 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                     out_report_rows = parse_out_report(c['report_content'])
                     calls = c['calls']
 
-                    # Date compacte depuis le OUT_REPORT (ou aujourd'hui)
+                    # Date compacte : utiliser la date du OUT_REPORT s'il n'est pas vide, sinon la date de référence
                     if out_report_rows:
                         date_compact = out_report_rows[0]['dateGeneration'].replace('.', '')
                     else:
-                        date_compact = datetime.now().strftime('%Y%m%d')
+                        date_compact = reference_date_compact
 
                     if batch_date_compact is None:
                         batch_date_compact = date_compact

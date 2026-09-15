@@ -836,16 +836,20 @@ MAPPING_AGENCES_DEFAULT = {
 MAPPING_AGENCES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd(), "mapping_agences.json")
 
 def load_mapping_agences_from_file():
-    """Charge le mapping depuis le fichier JSON persistant, sinon retourne le defaut."""
+    """Charge le mapping : DEFAULT + fichier JSON (le fichier complète/écrase, mais ne supprime jamais les clés du défaut)."""
+    base = MAPPING_AGENCES_DEFAULT.copy()
     try:
         if os.path.exists(MAPPING_AGENCES_FILE):
             with open(MAPPING_AGENCES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and data:
-                    return data
+                    # merge : défaut d'abord, puis fichier par-dessus (pour ne jamais perdre ex: 8009 si vieux fichier tronqué)
+                    merged = base.copy()
+                    merged.update(data)
+                    return merged
     except Exception as e:
         print(f"load mapping error: {e}")
-    return MAPPING_AGENCES_DEFAULT.copy()
+    return base
 
 def save_mapping_agences_to_file(mapping):
     """Sauvegarde le mapping dans le fichier JSON persistant."""
@@ -1048,10 +1052,15 @@ def detecter_agence_depuis_police_agence(df):
         # Si on a trouvé un code mais non référencé, on ne retourne pas tout de suite, on tente fallback Intermediaire
         # On garde numeros_testes pour message si fallback echoue aussi
     # Fallback : essayer via Intermediaire (plus fiable quand N° Police est en 5,86E+14)
+    # On utilise nettoyer_colonne_agence pour gérer accents (Intermédiaire) + alias Agence/Interm
     col_inter = None
     for col in df.columns:
+        try:
+            cleaned = nettoyer_colonne_agence(col)
+        except:
+            cleaned = str(col).lower()
         low = str(col).lower()
-        if 'intermediaire' in low or 'intermediair' in low:
+        if 'intermediaire' in cleaned or 'intermediaire' in low or 'intermediair' in low or cleaned in ['agence', 'interm'] or low.strip() in ['agence', 'interm']:
             col_inter = col
             break
     if col_inter is not None:
@@ -1075,7 +1084,15 @@ def detecter_agence_depuis_police_agence(df):
         vrais_codes = [c for c in numeros_testes if not c.startswith('SCI:')]
         if vrais_codes:
             codes_non_trouves = list(set(vrais_codes))[:3]
-            return None, None, None, f"Code(s) '{', '.join(codes_non_trouves)}' non référencé(s) - N° Police en format scientifique ? Détection via Intermédiaire aussi échouée."
+            # Hint : si le code existe dans le défaut mais pas dans le mapping courant (vieux JSON), proposer Recharger défaut
+            hint = ""
+            try:
+                _missing_in_curr = [c for c in codes_non_trouves if c not in _num2code and any(c == re.sub(r'\D', '', k)[-4:] if re.sub(r'\D', '', k) else False for k in MAPPING_AGENCES_DEFAULT.keys())]
+                if _missing_in_curr:
+                    hint = f" - '{', '.join(_missing_in_curr)}' existe dans le défaut ! Cliquez '🔄 Recharger défaut' dans Gestion MAPPING ou ajoutez-le."
+            except:
+                pass
+            return None, None, None, f"Code(s) '{', '.join(codes_non_trouves)}' non référencé(s){hint} - Vérifiez via '⚙️ Gestion MAPPING' ci-dessous (recherche 8009) puis complétez manuellement."
         else:
             return None, None, None, f"N° Police en format scientifique (ex: 5,86E+14) - détection impossible, et Intermédiaire non trouvé"
     return None, None, None, f"Colonne '{col_police}' vide ou format invalide"
@@ -1361,20 +1378,17 @@ def extraire_code_intermediaire_pour_generation(df, nom_agence=None, code_agence
     """Extrait le code numerique de base depuis la colonne Intermediaire ou fallback agence.
     Retourne ex: '5863' ou None si non trouve.
     """
-    # 1) Essayer colonne Intermediaire (avant nettoyage, on cherche colonne contenant intermediaire/agence)
+    # 1) Essayer colonne Intermediaire (avec nettoyage accents + alias Agence/Interm)
     col_inter = None
     for col in df.columns:
         low = str(col).lower()
-        if 'intermediaire' in low or 'intermediair' in low or low.strip() in ['agence','interm']:
+        try:
+            cleaned = nettoyer_colonne_agence(col)
+        except:
+            cleaned = low
+        if 'intermediaire' in cleaned or 'intermediaire' in low or 'intermediair' in low or cleaned in ['agence', 'interm'] or low.strip() in ['agence', 'interm']:
             col_inter = col
             break
-        # aussi nettoyer
-        try:
-            if 'intermediaire' in str(col).strip().lower():
-                col_inter = col
-                break
-        except:
-            pass
     if col_inter is not None:
         for val in df[col_inter].dropna().head(5):
             s = str(val).strip()

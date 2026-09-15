@@ -1902,32 +1902,94 @@ def app_traitement_agence():
                 st.write("Aperçu du fichier uploadé :")
                 st.dataframe(_df_map.head(), use_container_width=True)
 
-                _cols_lower = {str(c).strip().lower(): c for c in _df_map.columns}
+                # Détection robuste CODE vs NOM (gère 'Agences' pluriel, 'CODE AGENCE', ordre inversé)
+                def _norm_col(c):
+                    s = str(c).strip().lower().replace('_', ' ')
+                    s = re.sub(r'\s+', ' ', s)
+                    return s
+                _cols_norm = {_norm_col(c): c for c in _df_map.columns}
                 _col_code = None
                 _col_nom = None
-                for k, v in _cols_lower.items():
-                    if k in ["code", "code_agence", "code agence", "agence_code", "id"]:
-                        _col_code = v
-                    if k in ["nom", "nom_agence", "nom agence", "libelle", "libellé", "agence", "raison sociale"]:
-                        _col_nom = v
+                _code_names = {"code", "code agence", "agence code", "id", "code intermediaire", "code intermediate"}
+                _nom_names = {"nom", "nom agence", "agences", "agence", "libelle", "libelle ", "raison sociale", "nom raison sociale", "agences "}
+                # 'agences' (pluriel) -> NOM ; 'code agence' -> CODE (priorité au code si ambigu)
+                for k_norm, v_orig in _cols_norm.items():
+                    if k_norm in _code_names:
+                        _col_code = v_orig
+                    elif k_norm in _nom_names:
+                        # 'agence' seul peut être ambigu, mais si on a déjà un code on le prend comme nom
+                        if _col_nom is None:
+                            _col_nom = v_orig
+                # Si les deux sont détectés, c'est bon (même si ordre inversé : Agences | CODE AGENCE)
                 if _col_code is None or _col_nom is None:
+                    # Fallback par contenu : la colonne qui ressemble le plus à des codes (AGENT_/BGD_/4 chiffres)
+                    def _score_code(col):
+                        try:
+                            _s = _df_map[col].dropna().astype(str).head(20)
+                            _n = 0
+                            for _v in _s:
+                                _vu = _v.strip().upper()
+                                if re.search(r'(AGENT|BGD)', _vu) or re.search(r'\d{4}', _vu):
+                                    # Nom type 'BGD BOUARFA' contient aussi BGD mais sans chiffres -> exiger chiffres ou underscore
+                                    if '_' in _vu or re.search(r'\d{4}', _vu):
+                                        _n += 1
+                            return _n
+                        except:
+                            return 0
                     if len(_df_map.columns) >= 2:
-                        _col_code = _df_map.columns[0]
-                        _col_nom = _df_map.columns[1]
+                        _c0, _c1 = _df_map.columns[0], _df_map.columns[1]
+                        if _col_code is None and _col_nom is None:
+                            # Les deux manquants : choisir par score
+                            if _score_code(_c1) >= _score_code(_c0):
+                                _col_code, _col_nom = _c1, _c0
+                            else:
+                                _col_code, _col_nom = _c0, _c1
+                        elif _col_code is None:
+                            # Code manquant : l'autre colonne (non-nom) est le code
+                            _cands = [c for c in _df_map.columns if c != _col_nom]
+                            _col_code = max(_cands, key=_score_code) if _cands else None
+                        elif _col_nom is None:
+                            _cands = [c for c in _df_map.columns if c != _col_code]
+                            # Le nom = colonne restante (même si elle s'appelle 'Agences')
+                            _col_nom = _cands[0] if _cands else None
                     else:
                         raise Exception("Fichier doit avoir au moins 2 colonnes (CODE, NOM)")
+                st.caption(f"Colonnes détectées → CODE: '{_col_code}' | NOM: '{_col_nom}'")
 
                 _new_entries = {}
+                _skipped = 0
                 for _, row in _df_map.iterrows():
                     _c = str(row[_col_code]).strip().upper() if pd.notna(row[_col_code]) else ""
                     _n = str(row[_col_nom]).strip() if pd.notna(row[_col_nom]) else ""
                     if not _c or _c.lower() == "nan" or not _n or _n.lower() == "nan":
+                        _skipped += 1
                         continue
                     if _c.isdigit():
                         _c = f"AGENT_A{_c}"
                     _new_entries[_c] = _n
 
-                st.info(f"{len(_new_entries)} agence(s) détectée(s) dans le fichier")
+                # Détection inversion : si peu de clés contiennent des chiffres mais beaucoup de valeurs en contiennent → colonnes inversées
+                if _new_entries:
+                    _keys_with_digits = sum(1 for k in _new_entries.keys() if re.search(r'\d{4}', k))
+                    _vals_with_digits = sum(1 for v in _new_entries.values() if re.search(r'\d{4}', str(v)))
+                    if _keys_with_digits < len(_new_entries) * 0.5 and _vals_with_digits > len(_new_entries) * 0.5:
+                        st.warning("⚠️ Colonnes CODE/NOM probablement inversées dans le fichier — inversion automatique appliquée. Vérifiez l'aperçu ci-dessous.")
+                        _swapped = {}
+                        for k, v in _new_entries.items():
+                            # swap : ancienne valeur (code réel) devient clé
+                            _nc = str(v).strip().upper()
+                            _nn = str(k).strip()
+                            if _nc.isdigit():
+                                _nc = f"AGENT_A{_nc}"
+                            _swapped[_nc] = _nn
+                        _new_entries = _swapped
+                st.info(f"{len(_new_entries)} agence(s) détectée(s) dans le fichier ({_skipped} ligne(s) ignorée(s))")
+                # Vérif ciblée 6656 pour debug
+                _check6656 = [f"{k} → {v}" for k, v in _new_entries.items() if '6656' in k or '6656' in str(v)]
+                if _check6656:
+                    st.success(f"✅ 6656 trouvé dans l'import : {_check6656[0]}")
+                else:
+                    st.warning("⚠️ 6656 NON trouvé dans le fichier importé — vérifiez que la ligne ASSUNOR / AGENT_A6656 existe bien.")
                 if st.button(f"✅ Confirmer import ({len(_new_entries)} agences) - {mode_import}", key="agence_confirm_import", type="primary"):
                     if mode_import == "Remplacer tout le mapping":
                         final_map = _new_entries

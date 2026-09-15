@@ -1234,9 +1234,20 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
     df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
     # Cas double/force : 1) base Intermediaire (digits si dans mapping), 2) sinon nouveau par ligne (dédiées). Helpers partagés, case-insensitive.
+    # Auto-détection mismatch police-vs-Intermediaire (ex: Mondial 8029/6701) même si flag False.
     _nouveau_par_ligne = {}
     _base_intermediaire = None
-    if force_regenerer_tous:
+    _mismatch_auto = False
+    try:
+        _num2c_loc = get_mapping_numero_vers_code()
+        _mm, _mm_code, _mm_det = _mismatch_police_intermediaire(df, _num2c_loc)
+        if _mm and _mm_code:
+            _mismatch_auto = True
+            _base_intermediaire = _mm_code
+    except:
+        pass
+    _force_effectif = bool(force_regenerer_tous or _mismatch_auto)
+    if _force_effectif and not _base_intermediaire:
         try:
             _num2c_loc = get_mapping_numero_vers_code()
             _base_intermediaire = _code_intermediaire_si_dans_mapping(df, _num2c_loc)
@@ -1343,18 +1354,18 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
                 mois_courant = datetime.now().strftime('%m')
             if annee_courante is None:
                 annee_courante = datetime.now().strftime('%Y')
-            if force_regenerer_tous:
+            if _force_effectif:
                 mask_a_regenerer = pd.Series([True] * len(df), index=df.index)
             else:
                 mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
             nb_a_regenerer = int(mask_a_regenerer.sum())
             if nb_a_regenerer > 0:
-                if force_regenerer_tous and _base_intermediaire:
+                if _force_effectif and _base_intermediaire:
                     # Priorité Intermediaire (digits vérifiés mapping) : base unique pour tout le fichier dès 00001
                     _bc = re.sub(r'\D', '', str(_base_intermediaire)) or re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
                     _nouv_all = generer_numeros_police(_bc, nb_a_regenerer, mois_courant, annee_courante)
                     df.loc[mask_a_regenerer, "N° Police"] = _nouv_all[:nb_a_regenerer]
-                elif force_regenerer_tous and _nouveau_par_ligne:
+                elif _force_effectif and _nouveau_par_ligne:
                     # Par ligne : base = nouveau de SA ligne (dédiée), compteur par base dès 00001
                     _code_fallback = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
                     _compteurs = {}
@@ -1526,17 +1537,58 @@ def _code_intermediaire_si_dans_mapping(df, num2code):
         pass
     return None
 
+def _mismatch_police_intermediaire(df, num2code):
+    """Cas Mondial : N° Police mixtes (ex: 8029 + 6701) alors qu'Intermediaire = 6701 (dans mapping).
+    Retourne (mismatch: bool, code_inter: str|None, groupes: dict). Ne compte que les polices
+    m9ada (pas scientifiques/vides). Seuil : groupe divergent >=2 lignes pour ignorer coquilles.
+    """
+    try:
+        try:
+            _col_pol = trouver_colonne_police_agence(df)
+        except:
+            _col_pol = None
+        if _col_pol is None:
+            return False, None, {}
+        _code_inter = _code_intermediaire_si_dans_mapping(df, num2code)
+        if not _code_inter:
+            return False, None, {}
+        from collections import Counter as _Cc
+        _groupes = _Cc()
+        for _v in df[_col_pol].dropna():
+            if est_police_scientifique_ou_vide(_v):
+                continue
+            _c4 = _extraire_4chiffres(_v)
+            if _c4:
+                _groupes[_c4] += 1
+        if not _groupes:
+            return False, None, {}
+        _divergents = {k: n for k, n in _groupes.items() if k != _code_inter and n >= 2}
+        if _divergents:
+            return True, _code_inter, {'groupes_police': dict(_groupes), 'divergents': _divergents, 'code_intermediaire': _code_inter}
+        return False, None, {'groupes_police': dict(_groupes)}
+    except:
+        return False, None, {}
+
 def analyser_double_code_agence(df):
-    """Détecte le cas 'deux colonnes code agence (ancien + nouveau)'.
+    """Détecte ancien+nouveau (2 colonnes) OU mismatch police-vs-Intermediaire (ex: Mondial 8029/6701).
     Retourne (double_detecte: bool, nouveau_code_fichier: str|None, details: dict).
     Priorité : 1) code Intermediaire (digits) si dans mapping jdid, 2) sinon dernier dédié.
-    100% insensible à la casse (bug 'Intermediaire' vs 'intermediaire' corrigé).
+    100% insensible à la casse.
     """
     try:
         _mapping = get_mapping_agences()
         _num2code = get_mapping_numero_vers_code()
     except:
         return False, None, {}
+    # D'abord : mismatch police-vs-Intermediaire (ex: Mondial 8029/6701) -> double automatique
+    try:
+        _mm, _mm_code, _mm_det = _mismatch_police_intermediaire(df, _num2code)
+        if _mm and _mm_code:
+            _mm_det = _mm_det or {}
+            _mm_det['source'] = 'mismatch-police-inter'
+            return True, _mm_code, _mm_det
+    except:
+        pass
     # Colonne police à exclure
     try:
         _col_police = trouver_colonne_police_agence(df)

@@ -1281,16 +1281,36 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
             # CIN / Nom/Raison sociale / Usage / autres : vide -> NA
             df[col] = df[col].apply(lambda x: "NA" if pd.isna(x) or str(x).strip() == "" else x)
     df = df.reindex(columns=MODELE_COLONNES)
-    # === Generation N° Police sequentielle base sur code intermediaire + MMYYYY + 00001 ===
+    # === N° Police : garder si déjà m9ada, régénérer seulement si scientifique/vide/NA (sans doublons) ===
     if code_base_intermediaire is not None:
         try:
-            n = len(df)
             if mois_courant is None:
                 mois_courant = datetime.now().strftime('%m')
             if annee_courante is None:
                 annee_courante = datetime.now().strftime('%Y')
-            nouveaux = generer_numeros_police(code_base_intermediaire, n, mois_courant, annee_courante)
-            df["N° Police"] = nouveaux
+            mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
+            nb_a_regenerer = int(mask_a_regenerer.sum())
+            if nb_a_regenerer > 0:
+                # Éviter doublons avec les N° déjà gardés
+                try:
+                    gardes = set(df.loc[~mask_a_regenerer, "N° Police"].astype(str).tolist())
+                except:
+                    gardes = set()
+                nouveaux = []
+                _i = 1
+                _code_clean = re.sub(r'\D', '', str(code_base_intermediaire)) or '0000'
+                _base = f"{_code_clean}{mois_courant}{annee_courante}"
+                # Générer en sautant les existants (sécurité anti-boucle infinie)
+                _guard = 0
+                while len(nouveaux) < nb_a_regenerer and _guard < nb_a_regenerer + len(gardes) + 1000:
+                    _guard += 1
+                    cand = f"{_base}{_i:05d}"
+                    _i += 1
+                    if cand in gardes:
+                        continue
+                    nouveaux.append(cand)
+                    gardes.add(cand)
+                df.loc[mask_a_regenerer, "N° Police"] = nouveaux[:nb_a_regenerer]
         except Exception as e:
             print(f"Erreur generation N° Police: {e}")
     return df
@@ -1436,6 +1456,21 @@ def generer_numeros_police(code_base, n, mois=None, annee=None):
     base = f"{code_base}{mois}{annee}"
     return [f"{base}{i:05d}" for i in range(1, n+1)]
 
+def est_police_scientifique_ou_vide(val):
+    """Retourne True si N° Police doit être régénéré : vide/NA ou format scientifique (5,86E+14). Sinon False (garder l'original m9ada)."""
+    if pd.isna(val) or val is None:
+        return True
+    s = str(val).strip()
+    if s == "" or s.upper() in ("NA", "NAN", "NONE"):
+        return True
+    # Format scientifique Excel : contient E+ (ex: 5,86E+14, 5.86E+14)
+    if "E+" in s.upper():
+        return True
+    # Variante sans + mais avec E et séparateur décimal (ex: 5,86E14)
+    if re.search(r'\d[,\.]\d+\s*[Ee]\s*\d+', s):
+        return True
+    return False
+
 def app_traitement_agence():
     st.markdown("Téléversez vos fichiers d'agence (Excel, CSV, TSV, .xls déguisé) — détection automatique de l'agence via les 4 premiers chiffres du N° Police.")
     fichiers_upload = st.file_uploader(
@@ -1539,16 +1574,29 @@ def app_traitement_agence():
                             except:
                                 pass
                     st.markdown("---")
-        # === Generation N° Police : extraction et saisie manuelle si besoin ===
-        st.markdown("### 🔢 Génération N° Police (remplace le format scientifique 5,86E+14)")
-        st.caption(f"Format : CODE + MMYYYY + 00001 — ex: 5863 + {datetime.now().strftime('%m%Y')} + 00001 → 5863{datetime.now().strftime('%m%Y')}00001 pour Intermédiaire 5863. Séquentiel par fichier.")
+        # === N° Police : garder si m9ada, régénérer seulement si scientifique/vide ===
+        st.markdown("### 🔢 N° Police — conservation si m9ada, génération si scientifique")
+        st.caption(f"Si N° Police déjà correct → conservé tel quel. Si scientifique (5,86E+14) / vide / NA → régénéré : CODE + MMYYYY + 00001 (ex: 5863 + {datetime.now().strftime('%m%Y')} + 00001).")
         mois_courant = datetime.now().strftime('%m')
         annee_courante = datetime.now().strftime('%Y')
-        st.info(f"📅 Mois/Année en cours utilisés : **{mois_courant}/{annee_courante}** — base : CODE + {mois_courant}{annee_courante} + 00001 (ex: 5863{mois_courant}{annee_courante}00001, 5863{mois_courant}{annee_courante}00002 …)")
-        # Pour chaque fichier valide, permettre verification / correction du code base
+        st.info(f"📅 Mois/Année en cours pour génération : **{mois_courant}/{annee_courante}**")
+        # Pour chaque fichier valide : compter combien à régénérer vs déjà corrects
         for idx2, f in enumerate([x for x in fichiers_info if x['df'] is not None]):
-            # Re-essayer extraction si vide ou si agence a ete corrigee
-            if not f.get('code_base_effectif'):
+            # Compter N° Police scientifiques/vides dans le fichier brut
+            try:
+                _col_pol = trouver_colonne_police_agence(f['df'])
+                if _col_pol is not None:
+                    _nb_invalid = int(f['df'][_col_pol].apply(est_police_scientifique_ou_vide).sum())
+                else:
+                    _nb_invalid = len(f['df'])
+                _nb_ok = len(f['df']) - _nb_invalid
+            except:
+                _nb_invalid = 0
+                _nb_ok = len(f['df'])
+            f['nb_a_regenerer'] = _nb_invalid
+            f['nb_deja_ok'] = _nb_ok
+            # Re-essayer extraction code base seulement si besoin (il y a des invalides)
+            if _nb_invalid > 0 and not f.get('code_base_effectif'):
                 try:
                     f['code_base'] = extraire_code_intermediaire_pour_generation(f['df'], f.get('nom_agence'), f.get('code'))
                     f['code_base_effectif'] = f['code_base']
@@ -1557,56 +1605,65 @@ def app_traitement_agence():
                     f['code_base_effectif'] = None
             code_base_auto = f.get('code_base')
             with st.container():
-                col_g1, col_g2, col_g3 = st.columns([2, 2, 3])
-                with col_g1:
-                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}*")
-                    if code_base_auto:
-                        st.success(f"Code extrait : **{code_base_auto}** → ex: {code_base_auto}{mois_courant}{annee_courante}00001")
-                    else:
-                        st.warning("⚠️ Code Intermédiaire non trouvé (colonne Intermediaire vide ou illisible)")
-                with col_g2:
-                    key_manual = f"agence_codebase_{idx2}_{f['nom_fichier']}"
-                    val_manual = st.text_input(
-                        "Code base manuel (4 chiffres, ex: 5863) — laisser vide pour garder auto",
-                        value="",
-                        placeholder=code_base_auto or "Ex: 5863",
-                        key=key_manual,
-                        help="Si l'extraction a échoué ou vous voulez forcer un autre code, tapez ici les 4 chiffres"
-                    )
-                    if val_manual.strip():
-                        digits = re.sub(r'\D','', val_manual.strip())
-                        if digits:
-                            f['code_base_effectif'] = digits[:4] if len(digits)>=4 else digits
-                            st.caption(f"→ Effectif manuel : **{f['code_base_effectif']}**")
+                st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok} déjà m9ada / 🔄 {_nb_invalid} à générer")
+                if _nb_invalid == 0:
+                    st.success("Tous les N° Police déjà corrects — conservés, pas de génération nécessaire.")
+                    # Montrer exemple de valeurs gardées
+                    try:
+                        _ex = f['df'][_col_pol].dropna().head(2).tolist() if _col_pol is not None else []
+                        if _ex:
+                            st.code("Ex conservés : " + " → ".join([str(x)[:20] for x in _ex]), language=None)
+                    except:
+                        pass
+                else:
+                    col_g1, col_g2, col_g3 = st.columns([2, 2, 3])
+                    with col_g1:
+                        if code_base_auto:
+                            st.success(f"Code extrait : **{code_base_auto}** → ex: {code_base_auto}{mois_courant}{annee_courante}00001")
                         else:
-                            st.error("Code invalide (chiffres requis)")
-                            f['code_base_effectif'] = None
-                    else:
-                        f['code_base_effectif'] = code_base_auto
-                with col_g3:
-                    eff = f.get('code_base_effectif')
-                    n = len(f['df'])
-                    if eff:
-                        preview = generer_numeros_police(eff, min(2, n), mois_courant, annee_courante)
-                        st.code(" → ".join(preview) + (f" … +{n-2} autres" if n>2 else ""), language=None)
-                        st.caption(f"{n} lignes → de {eff}{mois_courant}{annee_courante}00001 à {eff}{mois_courant}{annee_courante}{n:05d}")
-                    else:
-                        st.error("Aucun code → génération impossible — saisissez manuel")
+                            st.warning("⚠️ Code Intermédiaire non trouvé (colonne Intermediaire vide ou illisible)")
+                    with col_g2:
+                        key_manual = f"agence_codebase_{idx2}_{f['nom_fichier']}"
+                        val_manual = st.text_input(
+                            "Code base manuel (4 chiffres, ex: 5863) — laisser vide pour garder auto",
+                            value="",
+                            placeholder=code_base_auto or "Ex: 5863",
+                            key=key_manual,
+                            help="Seulement pour les N° scientifiques/vides. Tapez ici les 4 chiffres si besoin."
+                        )
+                        if val_manual.strip():
+                            digits = re.sub(r'\D','', val_manual.strip())
+                            if digits:
+                                f['code_base_effectif'] = digits[:4] if len(digits)>=4 else digits
+                                st.caption(f"→ Effectif manuel : **{f['code_base_effectif']}**")
+                            else:
+                                st.error("Code invalide (chiffres requis)")
+                                f['code_base_effectif'] = None
+                        else:
+                            f['code_base_effectif'] = code_base_auto
+                    with col_g3:
+                        eff = f.get('code_base_effectif')
+                        if eff:
+                            preview = generer_numeros_police(eff, min(2, _nb_invalid), mois_courant, annee_courante)
+                            st.code(" → ".join(preview) + (f" … +{_nb_invalid-2} autres à générer" if _nb_invalid>2 else ""), language=None)
+                            st.caption(f"{_nb_invalid} à générer (sur {len(f['df'])}), {_nb_ok} gardés tels quels.")
+                        else:
+                            st.error("Aucun code → génération impossible — saisissez manuel")
                 st.markdown("---")
         fichiers_valides = [f for f in fichiers_info if f['df'] is not None]
-        # Tous prêts si agence ok ET code_base_effectif ok
-        tous_prets = all((f['detecte'] or f['nom_agence']) and f.get('code_base_effectif') for f in fichiers_valides)
+        # Tous prêts si agence ok ET (pas de génération nécessaire OU code_base ok)
+        tous_prets = all((f['detecte'] or f['nom_agence']) and (f.get('nb_a_regenerer', 0) == 0 or f.get('code_base_effectif')) for f in fichiers_valides)
         st.markdown("### 🚀 Traitement")
         if not fichiers_valides:
             st.error("❌ Aucun fichier valide")
         elif not tous_prets:
             # Message plus precis
-            manques = [f['nom_fichier'] for f in fichiers_valides if not (f['detecte'] or f['nom_agence']) or not f.get('code_base_effectif')]
+            manques = [f['nom_fichier'] for f in fichiers_valides if not (f['detecte'] or f['nom_agence']) or (f.get('nb_a_regenerer', 0) > 0 and not f.get('code_base_effectif'))]
             st.warning(f"ℹ️ Complétez les agences / codes manquants : {', '.join(manques[:3])}")
             # Detail
             for f in fichiers_valides:
-                if not f.get('code_base_effectif'):
-                    st.info(f"📄 {f['nom_fichier']} : saisissez le Code base Intermédiaire (ex: 5863) ci-dessus")
+                if f.get('nb_a_regenerer', 0) > 0 and not f.get('code_base_effectif'):
+                    st.info(f"📄 {f['nom_fichier']} : {f.get('nb_a_regenerer', 0)} N° scientifiques → saisissez le Code base Intermédiaire (ex: 5863) ci-dessus")
         if st.button("Lancer le traitement", type="primary", disabled=not tous_prets or not fichiers_valides, use_container_width=True, key="agence_lancer"):
             fichiers_traites = []
             resultats = []
@@ -1615,7 +1672,7 @@ def app_traitement_agence():
             _mois_c = datetime.now().strftime('%m')
             _annee_c = datetime.now().strftime('%Y')
             for idx, f in enumerate(fichiers_info):
-                if f['df'] is not None and f['nom_agence'] and f.get('code_base_effectif'):
+                if f['df'] is not None and f['nom_agence'] and (f.get('nb_a_regenerer', 0) == 0 or f.get('code_base_effectif')):
                     try:
                         df_traite = traiter_fichier_agence(f['df'].copy(), f['nom_agence'], f['format_date'], f['code_base_effectif'], _mois_c, _annee_c)
                         mois = detecter_mois_echeance_agence(f['df'], f['format_date'])

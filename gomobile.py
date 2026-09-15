@@ -1229,7 +1229,7 @@ def formater_telephone_agence(valeur):
         tel = "0" + tel
     return tel if tel else "NA"
 
-def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermediaire=None, mois_courant=None, annee_courante=None):
+def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermediaire=None, mois_courant=None, annee_courante=None, force_regenerer_tous=False):
     # Conserver df original pour extraction si besoin (deja fait en amont)
     df.columns = [nettoyer_colonne_agence(c) for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIASES_COLONNES.items() if k in df.columns})
@@ -1313,13 +1313,17 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
             df[col] = df[col].apply(lambda x: "NA" if pd.isna(x) or str(x).strip() == "" else x)
     df = df.reindex(columns=MODELE_COLONNES)
     # === N° Police : garder si déjà m9ada, régénérer seulement si scientifique/vide/NA (sans doublons) ===
+    # Si force_regenerer_tous (cas double code ancien+nouveau) : tout régénérer à partir de 0 (00001)
     if code_base_intermediaire is not None:
         try:
             if mois_courant is None:
                 mois_courant = datetime.now().strftime('%m')
             if annee_courante is None:
                 annee_courante = datetime.now().strftime('%Y')
-            mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
+            if force_regenerer_tous:
+                mask_a_regenerer = pd.Series([True] * len(df), index=df.index)
+            else:
+                mask_a_regenerer = df["N° Police"].apply(est_police_scientifique_ou_vide)
             nb_a_regenerer = int(mask_a_regenerer.sum())
             if nb_a_regenerer > 0:
                 # Éviter doublons avec les N° déjà gardés
@@ -1425,6 +1429,117 @@ def creer_zip_agence(fichiers):
     return buf.getvalue()
 
 
+def analyser_double_code_agence(df):
+    """Détecte le cas 'deux colonnes code agence (ancien + nouveau)'.
+    Retourne (double_detecte: bool, nouveau_code_fichier: str|None, details: dict).
+    Règle : parmi les colonnes type agence/code (hors N° Police), si >=2 colonnes
+    contiennent des codes, on prend par ligne le DERNIER code présent dans le mapping
+    (nouveau), et au niveau fichier le plus fréquent (mode).
+    """
+    try:
+        _mapping = get_mapping_agences()
+        _num2code = get_mapping_numero_vers_code()
+    except:
+        return False, None, {}
+    # Colonne police à exclure
+    try:
+        _col_police = trouver_colonne_police_agence(df)
+    except:
+        _col_police = None
+    # Colonnes candidates : header évoque agence/code/intermediaire (hors police/date/tel)
+    _cands = []
+    for col in df.columns:
+        if col == _col_police:
+            continue
+        low = str(col).lower()
+        try:
+            cleaned = nettoyer_colonne_agence(col)
+        except:
+            cleaned = low
+        # Exclure dates / téléphone / cin / immat / usage / nom / etat / duree / segment...
+        if any(k in cleaned for k in ['date', 'telephone', 'tel ', 'tel', 'cin', 'immatriculation', 'immat', 'matricule', 'plaque', 'usage', 'nom', 'client', 'raison', 'etat', 'statut', 'duree', 'dure', 'heure', 'segment', 'risque', 'appetence', 'echeance', 'effet']):
+            # 'code' seul reste ambigu : on garde seulement si header contient agence/intermediaire/code-agence
+            if not ('agence' in cleaned or 'intermediaire' in cleaned or 'interm' in cleaned):
+                continue
+        if ('agence' in cleaned or 'intermediaire' in cleaned or 'intermediaire' in low
+                or 'intermediair' in low or 'code' in cleaned):
+            # Éviter la colonne N° Police déjà exclue (contient 'police'/'numero')
+            if 'police' in cleaned or 'numero' in cleaned:
+                continue
+            _cands.append(col)
+    if len(_cands) < 2:
+        return False, None, {'colonnes_candidates': [str(c) for c in _cands]}
+    # Extraire codes par colonne (4 chiffres) et vérifier présence mapping
+    def _code4_of(val):
+        if pd.isna(val):
+            return None
+        s = str(val).strip()
+        if not s or s.lower() in ('nan', 'na', 'none'):
+            return None
+        m = re.search(r'(\d{4})', s)
+        if m:
+            return m.group(1)[:4]
+        return None
+    # Compter colonnes qui contiennent vraiment des codes du mapping
+    _cols_avec_codes = []
+    for col in _cands:
+        try:
+            _vals = df[col].dropna().head(10)
+            _hits = sum(1 for v in _vals if (_code4_of(v) in _num2code) if _code4_of(v))
+            if _hits >= 1:
+                _cols_avec_codes.append(col)
+        except:
+            pass
+    if len(_cols_avec_codes) < 2:
+        # Pas deux colonnes avec codes du mapping : vérifier quand même si 2 colonnes avec codes quelconques
+        # (ancien code peut ne plus être dans le mapping) -> on prend quand même le dernier existant
+        _cols_avec_quelconque = []
+        for col in _cands:
+            try:
+                _vals = df[col].dropna().head(10)
+                _hq = sum(1 for v in _vals if _code4_of(v))
+                if _hq >= 1:
+                    _cols_avec_quelconque.append(col)
+            except:
+                pass
+        if len(_cols_avec_quelconque) < 2:
+            return False, None, {'colonnes_candidates': [str(c) for c in _cands]}
+        _cols_avec_codes = _cols_avec_quelconque
+    # Nouveau = DERNIERE colonne dédiée 'code' (pas Intermediaire générique qui écrase le nouveau)
+    # Séparer colonnes dédiées (header contient 'code') vs génériques (intermediaire/agence)
+    def _is_dediee(col):
+        try:
+            _cl = nettoyer_colonne_agence(col)
+        except:
+            _cl = str(col).lower()
+        return 'code' in _cl
+    _dediees = [c for c in _cols_avec_codes if _is_dediee(c)]
+    _cols_nouveau = _dediees if _dediees else _cols_avec_codes
+    # Cas 1 dédiée + générique avec codes différents (ancien en Intermediaire, nouveau en Code) -> double aussi
+    if len(_dediees) == 1 and len(_cols_avec_codes) >= 2:
+        pass  # on garde _cols_nouveau = dédiée (nouveau), Intermediaire ignoré pour le choix
+    # Par ligne : prendre le DERNIER code dédié présent dans le mapping (nouveau)
+    _choisis = []
+    for _, row in df.head(1000).iterrows():
+        _codes_ligne = []
+        for col in _cols_nouveau:
+            try:
+                _c4 = _code4_of(row[col])
+                if _c4 and _c4 in _num2code:
+                    _codes_ligne.append(_c4)
+            except:
+                pass
+        if _codes_ligne:
+            _choisis.append(_codes_ligne[-1])
+    if not _choisis:
+        return False, None, {'colonnes_candidates': [str(c) for c in _cols_avec_codes]}
+    # Mode (plus fréquent) au niveau fichier
+    try:
+        _nouveau = max(set(_choisis), key=_choisis.count)
+    except:
+        _nouveau = _choisis[-1]
+    return True, _nouveau, {'colonnes_candidates': [str(c) for c in _cols_avec_codes], 'colonnes_nouveau': [str(c) for c in _cols_nouveau], 'exemples': _choisis[:5]}
+
 def extraire_code_intermediaire_pour_generation(df, nom_agence=None, code_agence=None):
     """Extrait le code numerique de base depuis la colonne Intermediaire ou fallback agence.
     Retourne ex: '5863' ou None si non trouve.
@@ -1527,6 +1642,24 @@ def app_traitement_agence():
                     code_base = extraire_code_intermediaire_pour_generation(df, nom, code)
                 except:
                     code_base = None
+                # Cas double code (ancien + nouveau) : toujours dernier mapping, nouveau code, regen totale des 00001
+                _double = False
+                _nouveau_code = None
+                _double_details = {}
+                try:
+                    _double, _nouveau_code, _double_details = analyser_double_code_agence(df)
+                except:
+                    pass
+                if _double and _nouveau_code:
+                    # Forcer le nouveau code pour generation + detection agence si besoin
+                    code_base = _nouveau_code
+                    try:
+                        _c2, _n2 = get_nom_agence_from_code(_nouveau_code)
+                        if _n2:
+                            code, nom, numero = _c2, _n2, _nouveau_code
+                            raison_echec = None
+                    except:
+                        pass
                 fichiers_info.append({
                     'fichier': fichier,
                     'nom_fichier': fichier.name,
@@ -1538,7 +1671,10 @@ def app_traitement_agence():
                     'detecte': nom is not None,
                     'raison_echec': raison_echec,
                     'code_base': code_base,
-                    'code_base_effectif': code_base
+                    'code_base_effectif': code_base,
+                    'double_code': _double,
+                    'nouveau_code': _nouveau_code,
+                    'double_details': _double_details
                 })
             except Exception as e:
                 fichiers_info.append({
@@ -1552,7 +1688,10 @@ def app_traitement_agence():
                     'detecte': False,
                     'raison_echec': f"Erreur lecture: {str(e)}",
                     'code_base': None,
-                    'code_base_effectif': None
+                    'code_base_effectif': None,
+                    'double_code': False,
+                    'nouveau_code': None,
+                    'double_details': {}
                 })
         detectes = [f for f in fichiers_info if f['detecte']]
         non_detectes = [f for f in fichiers_info if not f['detecte']]
@@ -1605,27 +1744,36 @@ def app_traitement_agence():
                             except:
                                 pass
                     st.markdown("---")
-        # === N° Police : garder si m9ada, régénérer seulement si scientifique/vide ===
-        st.markdown("### 🔢 N° Police — conservation si m9ada, génération si scientifique")
-        st.caption(f"Si N° Police déjà correct → conservé tel quel. Si scientifique (5,86E+14) / vide / NA → régénéré : CODE + MMYYYY + 00001 (ex: 5863 + {datetime.now().strftime('%m%Y')} + 00001).")
+        # === N° Police : garder si m9ada, régénérer si scientifique/vide, ou TOUT si double code ancien+nouveau ===
+        st.markdown("### 🔢 N° Police — conservation si m9ada, génération si scientifique / double code")
+        st.caption(f"Si N° Police déjà correct → conservé. Si scientifique (5,86E+14) / vide → régénéré. Si 2 codes agence (ancien+nouveau) → nouveau code + régénération totale dès 00001.")
         mois_courant = datetime.now().strftime('%m')
         annee_courante = datetime.now().strftime('%Y')
         st.info(f"📅 Mois/Année en cours pour génération : **{mois_courant}/{annee_courante}**")
-        # Pour chaque fichier valide : compter combien à régénérer vs déjà corrects
+        # Pour chaque fichier valide : compter combien à régénérer vs déjà corrects (+ cas double code)
         for idx2, f in enumerate([x for x in fichiers_info if x['df'] is not None]):
-            # Compter N° Police scientifiques/vides dans le fichier brut
-            try:
-                _col_pol = trouver_colonne_police_agence(f['df'])
-                if _col_pol is not None:
-                    _nb_invalid = int(f['df'][_col_pol].apply(est_police_scientifique_ou_vide).sum())
-                else:
-                    _nb_invalid = len(f['df'])
-                _nb_ok = len(f['df']) - _nb_invalid
-            except:
-                _nb_invalid = 0
-                _nb_ok = len(f['df'])
+            _is_double = bool(f.get('double_code') and f.get('nouveau_code'))
+            if _is_double:
+                # Double code : tout régénérer à partir du nouveau code (gado a 0)
+                _nb_invalid = len(f['df'])
+                _nb_ok = 0
+                f['code_base'] = f.get('nouveau_code')
+                f['code_base_effectif'] = f.get('nouveau_code')
+            else:
+                # Compter N° Police scientifiques/vides dans le fichier brut
+                try:
+                    _col_pol = trouver_colonne_police_agence(f['df'])
+                    if _col_pol is not None:
+                        _nb_invalid = int(f['df'][_col_pol].apply(est_police_scientifique_ou_vide).sum())
+                    else:
+                        _nb_invalid = len(f['df'])
+                    _nb_ok = len(f['df']) - _nb_invalid
+                except:
+                    _nb_invalid = 0
+                    _nb_ok = len(f['df'])
             f['nb_a_regenerer'] = _nb_invalid
             f['nb_deja_ok'] = _nb_ok
+            f['force_regenerer'] = _is_double
             # Re-essayer extraction code base seulement si besoin (il y a des invalides)
             if _nb_invalid > 0 and not f.get('code_base_effectif'):
                 try:
@@ -1636,7 +1784,12 @@ def app_traitement_agence():
                     f['code_base_effectif'] = None
             code_base_auto = f.get('code_base')
             with st.container():
-                st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok} déjà m9ada / 🔄 {_nb_invalid} à générer")
+                if f.get('double_code') and f.get('nouveau_code'):
+                    _det = f.get('double_details', {}) or {}
+                    _cols_txt = ', '.join(_det.get('colonnes_candidates', [])[:3])
+                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — 🔀 Double code détecté (ancien+nouveau) [{_cols_txt}] → nouveau **{f.get('nouveau_code')}**, régénération totale dès 00001")
+                else:
+                    st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok} déjà m9ada / 🔄 {_nb_invalid} à générer")
                 if _nb_invalid == 0:
                     st.success("Tous les N° Police déjà corrects — conservés, pas de génération nécessaire.")
                     # Montrer exemple de valeurs gardées
@@ -1705,7 +1858,7 @@ def app_traitement_agence():
             for idx, f in enumerate(fichiers_info):
                 if f['df'] is not None and f['nom_agence'] and (f.get('nb_a_regenerer', 0) == 0 or f.get('code_base_effectif')):
                     try:
-                        df_traite = traiter_fichier_agence(f['df'].copy(), f['nom_agence'], f['format_date'], f['code_base_effectif'], _mois_c, _annee_c)
+                        df_traite = traiter_fichier_agence(f['df'].copy(), f['nom_agence'], f['format_date'], f['code_base_effectif'], _mois_c, _annee_c, bool(f.get('force_regenerer', False)))
                         mois = detecter_mois_echeance_agence(f['df'], f['format_date'])
                         # Le nom de sortie garde le mois d'echeance detecte, mais le N° Police utilise mois/annee en cours
                         nom_sortie = f"ASSURCALL_{nettoyer_nom_fichier_agence(f['nom_agence'])}_{mois}.xlsx"

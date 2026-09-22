@@ -1580,12 +1580,12 @@ def trouver_colonne_cat(df, kind):
                 return c
         return None
     if kind == "telephone":
-        keys = ["telephone", "telephone_1", "tel", "gsm", "mobile", "phone", "tel_gsm"]
+        keys = ["telephone", "telephone_1", "tel", "gsm", "mobile", "phone", "tel_gsm", "portable"]
         for c, n in cols_norm.items():
             if n in keys:
                 return c
         for c, n in cols_norm.items():
-            if "tel" in n or "gsm" in n or "phone" in n or "mobile" in n:
+            if "tel" in n or "gsm" in n or "phone" in n or "mobile" in n or "portab" in n:
                 return c
         return None
     return None
@@ -1719,7 +1719,8 @@ def _norm_agence_key(valeur):
 
 
 def _cles_agence(valeur):
-    """Variantes de cle pour VLOOKUP robuste : MAMDA_AGADIR == AGADIR == MAMDA AGADIR."""
+    """Variantes de cle pour VLOOKUP robuste : MAMDA_AGADIR == AGADIR == MAMDA AGADIR.
+    Tolère aussi le préfixe agent : MAMDA AG ABOUKIR EL == ABOUKIR EL."""
     base = _norm_agence_key(valeur)
     if not base:
         return []
@@ -1727,6 +1728,12 @@ def _cles_agence(valeur):
     sans_prefix = re.sub(r'^MAMDA[\s_\-]+', '', base)
     if sans_prefix and sans_prefix not in cles:
         cles.append(sans_prefix)
+    for c in list(cles):
+        # préfixe agent : 'AG ', 'AGT ', 'AGENT ', 'AGENCE ' (+ variantes _ / -)
+        # ('AGADIR' intact : exige un séparateur après AG)
+        sans_ag = re.sub(r'^(AG|AGT|AGENT|AGENCE)[\s_\-]+', '', c)
+        if sans_ag and sans_ag not in cles:
+            cles.append(sans_ag)
     for c in list(cles):
         alt = c.replace('_', ' ')
         if alt not in cles:
@@ -1945,16 +1952,169 @@ def trouver_colonne_mamda_api(df, kind):
     return None
 
 
+def _colonne_utile(df, col):
+    """True si la colonne existe et contient au moins une valeur non vide."""
+    try:
+        if col is None or col not in df.columns:
+            return False
+        s = df[col].dropna().astype(str).str.strip()
+        s = s[~s.isin(["", "nan", "None", "NaT"])]
+        return len(s) > 0
+    except:
+        return False
+
+
+def _serie_ressemble_police(serie, seuil=0.5):
+    """True si la majorité des valeurs ressemblent à des codes police (chiffres + lettres)."""
+    try:
+        vals = [str(v).strip() for v in serie.dropna().tolist()]
+        vals = [v for v in vals if v and v.lower() not in ("nan", "none", "nat")]
+        ech = vals[:30]
+        if not ech:
+            return False
+        pats = [v for v in ech if re.search(r'\d', v) and re.search(r'[A-Za-z]', v)]
+        return len(pats) / len(ech) >= seuil
+    except:
+        return False
+
+
+def _serie_parse_dates(serie, format_date, seuil=0.5):
+    """True si la majorité des valeurs se convertissent en dates."""
+    try:
+        vals = [v for v in serie.dropna().tolist() if str(v).strip() not in ("", "nan", "None", "NaT")]
+        ech = vals[:30]
+        if not ech:
+            return False
+        ok = sum(1 for v in ech if convertir_date_agence(v, format_date) is not None
+                 and pd.notna(convertir_date_agence(v, format_date)))
+        return ok / len(ech) >= seuil
+    except:
+        return False
+
+
+def _fusionner_feuilles(feuilles):
+    """Concatène un dict {nom_feuille: df} en un seul DataFrame (entête unique).
+    Normalise les noms de colonnes (strip) et supprime les lignes entièrement vides."""
+    frames = []
+    noms = []
+    for nom_f, df in (feuilles or {}).items():
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+        cols_utiles = [c for c in df.columns if c and not str(c).lower().startswith("unnamed")]
+        if not cols_utiles:
+            continue
+        df = df.dropna(how="all")
+        if df.empty:
+            continue
+        frames.append(df)
+        noms.append(str(nom_f))
+    if not frames:
+        raise Exception("Aucune feuille exploitable dans le fichier Excel")
+    fusion = pd.concat(frames, ignore_index=True, sort=False)
+    return fusion, noms
+
+
+def lire_fichier_agence_multifeuilles(fichier):
+    """Lit un fichier traitement en fusionnant toutes ses feuilles (un seul entête).
+    Retourne (df_fusionne, [noms_feuilles]). Si une seule feuille/CSV : 1 nom."""
+    nom = (getattr(fichier, "name", "") or "").lower()
+    contenu = fichier.read()
+    fichier.seek(0)
+    if contenu.startswith(b'PK') or nom.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+        try:
+            feuilles = pd.read_excel(BytesIO(contenu), dtype=str, engine='openpyxl', sheet_name=None)
+            return _fusionner_feuilles(feuilles)
+        except Exception:
+            pass
+    if contenu.startswith(b'\xd0\xcf\x11\xe0') or nom.endswith(".xls"):
+        feuilles = None
+        try:
+            feuilles = pd.read_excel(BytesIO(contenu), dtype=str, engine='xlrd', sheet_name=None)
+        except Exception:
+            feuilles = None
+        if feuilles is None:
+            try:
+                feuilles = pd.read_excel(BytesIO(contenu), dtype=str, engine='calamine', sheet_name=None)
+            except Exception:
+                feuilles = None
+        if feuilles is not None:
+            return _fusionner_feuilles(feuilles)
+    df = lire_fichier_agence(fichier)
+    return df, [getattr(fichier, "name", "") or "Fichier"]
+
+
+def _resoudre_telephone_api(df, exclure=None):
+    """Trouve la colonne téléphone pour MAMDA API : standard (portable inclus),
+    sinon Primenette (layout décalé), sinon recherche par contenu (9+ chiffres).
+    Retourne (colonne|None, note|None)."""
+    exclure = set(exclure or [])
+    col = trouver_colonne_cat(df, "telephone")
+    if _colonne_utile(df, col):
+        return col, None
+    cols_n = {}
+    for c in df.columns:
+        try:
+            cols_n[c] = nettoyer_colonne_agence(c)
+        except:
+            cols_n[c] = str(c).strip().lower()
+    for c, n in cols_n.items():
+        if n in ("primenette", "prime nette", "prime_nette") and _colonne_utile(df, c):
+            return c, "Primenette"
+    best, best_n = None, 0
+    for c in df.columns:
+        if c in exclure:
+            continue
+        try:
+            n = sum(1 for v in df[c].dropna().tolist()[:50]
+                    if len(re.sub(r"\D", "", str(v))) >= 9)
+        except:
+            continue
+        if n > best_n:
+            best, best_n = c, n
+    if best is not None and best_n > 0:
+        return best, None
+    return None, None
+
+
 def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     """VLOOKUP : agence -> code_agence (NA si introuvable).
     Sortie : agence | code_agence | nomClient | police | date | telephone."""
-    col_ag = trouver_colonne_mamda_api(df_trait, "agence")
+    col_ag = trouver_colonne_mamda(df_trait, "agence")
+    if col_ag is None:
+        # Fallback exports MAMDA : la colonne agence s'appelle 'raisonSocial'
+        cols_n = {}
+        for c in df_trait.columns:
+            try:
+                cols_n[c] = nettoyer_colonne_agence(c)
+            except:
+                cols_n[c] = str(c).strip().lower()
+        for c, n in cols_n.items():
+            if n in ("raisonsocial", "raison sociale", "raison_sociale"):
+                col_ag = c
+                break
     if col_ag is None:
         raise Exception("Colonne 'agence' introuvable dans le fichier traitement")
     col_nom = trouver_colonne_mamda_api(df_trait, "nomClient")
     col_pol = trouver_colonne_mamda_api(df_trait, "police")
-    col_tel = trouver_colonne_mamda_api(df_trait, "telephone")
-    col_date = trouver_colonne_mamda_api(df_trait, "date")
+    col_date_head = trouver_colonne_mamda_api(df_trait, "date")
+    # Détection layout décalé : 'nomClient' contient des codes police ET 'police' contient des dates
+    # (ex: raisonSocial=agence, nomClient=police, police=date, Primenette=téléphone)
+    decale = False
+    if col_nom is not None and col_pol is not None:
+        try:
+            if _serie_ressemble_police(df_trait[col_nom]) and _serie_parse_dates(df_trait[col_pol], format_date):
+                decale = True
+        except:
+            pass
+    if decale:
+        col_pol_src, col_date_src, col_nom_src = col_nom, col_pol, None
+    else:
+        col_pol_src, col_date_src, col_nom_src = col_pol, col_date_head, col_nom
+    col_tel_src, tel_note = _resoudre_telephone_api(df_trait, {col_ag, col_nom, col_pol, col_date_src})
+    infos = {"layout": ("decale" if decale else "standard"),
+             "tel_colonne": (str(col_tel_src) if col_tel_src is not None else None)}
     out = pd.DataFrame()
 
     def _txt(v):
@@ -1973,31 +2133,31 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
                 break
         codes.append(trouve)
     out["code_agence"] = codes
-    if col_nom is not None:
-        out["nomClient"] = df_trait[col_nom].apply(_txt)
+    if col_nom_src is not None:
+        out["nomClient"] = df_trait[col_nom_src].apply(_txt)
     else:
         out["nomClient"] = "NA"
-    if col_pol is not None:
-        out["police"] = df_trait[col_pol].apply(_txt)
+    if col_pol_src is not None:
+        out["police"] = df_trait[col_pol_src].apply(_txt)
     else:
         out["police"] = "NA"
-    if col_date is not None:
+    if col_date_src is not None:
         def _conv_date(x):
             if pd.isna(x) or str(x).strip() in ("", "nan", "None", "NaT"):
                 return pd.NaT
             d = convertir_date_agence(x, format_date)
-            if pd.notna(d):
+            if d is not None and pd.notna(d):
                 return d
             return str(x).strip()
-        out["date"] = df_trait[col_date].apply(_conv_date)
+        out["date"] = df_trait[col_date_src].apply(_conv_date)
     else:
         out["date"] = pd.NaT
-    if col_tel is not None:
-        out["telephone"] = df_trait[col_tel].apply(formater_telephone_cat)
+    if col_tel_src is not None:
+        out["telephone"] = df_trait[col_tel_src].apply(formater_telephone_cat)
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_MAMDA_API)
-    return out
+    return out, infos
 
 
 def to_excel_bytes_mamda_api(df):
@@ -2602,7 +2762,7 @@ def app_traitement_agence():
                 return
         else:
             st.info("Téléversez la liste `agence | code_agence` pour continuer.")
-        st.markdown("##### Étape 2 : Fichier(s) traitement (colonnes `agence` + `nomClient` + `police` + `date` + `telephone`)")
+        st.markdown("##### Étape 2 : Fichier(s) traitement (colonnes `agence`/`raisonSocial` + `nomClient` + `police` + `date` + `telephone`/`Primenette` — plusieurs feuilles fusionnées automatiquement)")
         fichiers_api = st.file_uploader(
             "📁 Glissez vos fichiers traitement ici",
             type=["xlsx", "xls", "csv"],
@@ -2639,14 +2799,18 @@ def app_traitement_agence():
         na_global_a = []
         for idx_a, fichier in enumerate(fichiers_api):
             try:
-                df_raw_a = lire_fichier_agence(fichier)
+                df_raw_a, feuilles_a = lire_fichier_agence_multifeuilles(fichier)
+                if len(feuilles_a) > 1:
+                    st.info(f"📑 {fichier.name} : {len(feuilles_a)} feuilles fusionnées ({', '.join(feuilles_a)}) → {len(df_raw_a)} lignes (un seul entête)")
                 fmt_a = 'FR'
                 try:
                     _cd_a = trouver_colonne_mamda_api(df_raw_a, "date")
                     fmt_a = detecter_format_date_agence(df_raw_a, _cd_a) if _cd_a is not None else 'FR'
                 except:
                     pass
-                df_a = traiter_fichier_mamda_api(df_raw_a, mapping_api, fmt_a)
+                df_a, info_a = traiter_fichier_mamda_api(df_raw_a, mapping_api, fmt_a)
+                if info_a.get("layout") == "decale":
+                    st.info("🔀 Layout détecté : `raisonSocial`→agence, `nomClient`→police, `police`→date, `Primenette`→téléphone")
                 nb_na_a = int((df_a["code_agence"].astype(str).str.upper() == "NA").sum())
                 if nom_custom_a_clean:
                     if len(fichiers_api) == 1:

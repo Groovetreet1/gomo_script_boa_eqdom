@@ -1957,18 +1957,43 @@ def app_traitement_agence():
         )
         if not fichiers_cat:
             return
+        # MMYYYY = mois prochain (ex: on est en 09 -> 102026)
+        _now = datetime.now()
+        _mp = _now.month + 1
+        _yp = _now.year
+        if _mp > 12:
+            _mp = 1
+            _yp += 1
+        mmyyyy = f"{_mp:02d}{_yp}"
+        nom_custom = st.text_input(
+            "✏️ Smia dial fichier (ex: MOUAATAMID)",
+            placeholder="MOUAATAMID",
+            key="cat_nom_fichier",
+            help="Ghadi tkhrj lik automatiquement : CAT_MOUAATAMID_MMYYYY.xlsx (MMYYYY = chhar jay)"
+        ).strip()
+        nom_custom_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom).strip().replace(" ", "_").upper()[:50]
+        if nom_custom_clean:
+            st.caption(f"Aperçu nom : **CAT_{nom_custom_clean}_{mmyyyy}.xlsx**")
+        else:
+            st.caption(f"MMYYYY (chhar jay) : **{mmyyyy}** — kteb smia lfo9 bach tkhrj CAT_SMIA_{mmyyyy}.xlsx")
         fichiers_traites = []
         resultats = []
-        for fichier in fichiers_cat:
+        for idx_cat, fichier in enumerate(fichiers_cat):
             try:
                 df_raw = lire_fichier_agence(fichier)
                 # detecter format date via colonne echeance si possible
                 col_ech_raw = trouver_colonne_cat(df_raw, "echeance")
                 fmt = detecter_format_date_agence(df_raw, col_ech_raw) if col_ech_raw is not None else 'FR'
                 df_cat = traiter_fichier_cat_assurance(df_raw, fmt)
-                base = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
-                base = re.sub(r'[\\/:*?"<>|]+', '_', base)[:50]
-                nom_sortie = f"CAT_{base}.xlsx"
+                if nom_custom_clean:
+                    if len(fichiers_cat) == 1:
+                        nom_sortie = f"CAT_{nom_custom_clean}_{mmyyyy}.xlsx"
+                    else:
+                        nom_sortie = f"CAT_{nom_custom_clean}_{idx_cat + 1}_{mmyyyy}.xlsx"
+                else:
+                    base = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
+                    base = re.sub(r'[\\/:*?"<>|]+', '_', base)[:50]
+                    nom_sortie = f"CAT_{base}_{mmyyyy}.xlsx"
                 excel_bytes = to_excel_bytes_cat(df_cat)
                 fichiers_traites.append((nom_sortie, excel_bytes))
                 resultats.append({"Source": fichier.name, "Lignes": len(df_cat), "Sortie": nom_sortie, "Statut": "✅ OK"})
@@ -1994,10 +2019,11 @@ def app_traitement_agence():
                     key="cat_dl_single"
                 )
             else:
+                zip_name = f"CAT_{nom_custom_clean}_{mmyyyy}.zip" if nom_custom_clean else f"CAT_BATCH_{mmyyyy}.zip"
                 st.download_button(
                     f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers)",
                     data=creer_zip_agence(fichiers_traites),
-                    file_name=f"CAT_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    file_name=zip_name,
                     mime="application/zip",
                     type="primary",
                     use_container_width=True,

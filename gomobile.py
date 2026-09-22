@@ -1764,7 +1764,9 @@ def trouver_colonne_mamda(df, kind):
         for c, n in cols_norm.items():
             if "code" in n:
                 continue
-            if n in ("agence", "agences", "agency", "nom agence", "nomagence", "nom_agence"):
+            if n in ("agence", "agences", "agency", "nom agence", "nomagence", "nom_agence",
+                     "libelle agence", "libelle_agence", "libelleagence",
+                     "point de vente", "point_de_vente", "nom point de vente"):
                 return c
         for c, n in cols_norm.items():
             if "code" in n:
@@ -1812,12 +1814,53 @@ def construire_mapping_mamda(df_ref):
     return mapping
 
 
+def _colonnes_detectees_txt(df, n=12):
+    """Liste les noms de colonnes détectés (pour messages d'erreur explicites)."""
+    try:
+        return ", ".join([str(c) for c in list(df.columns)[:n]])
+    except:
+        return "?"
+
+
+def _reparer_entete_agence(df):
+    """Si l'entête n'est pas en 1ère ligne (titres/lignes vides au-dessus),
+    cherche dans les 8 premières lignes celle qui contient un nom de colonne
+    agence (agence / raisonSocial) et l'utilise comme entête.
+    Retourne (df_corrige, True) si réparation, sinon (df, False)."""
+    try:
+        if df is None or df.empty:
+            return df, False
+        if trouver_colonne_mamda(df, "agence") is not None:
+            return df, False
+        noms_agence = {"agence", "agences", "agency", "nom agence", "nomagence", "nom_agence",
+                       "libelle agence", "libelle_agence", "libelleagence",
+                       "point de vente", "point_de_vente", "nom point de vente",
+                       "raisonsocial", "raison sociale", "raison_sociale"}
+        max_scan = min(8, len(df))
+        for i in range(max_scan):
+            try:
+                vals = [nettoyer_colonne_agence(v) for v in df.iloc[i].tolist()]
+            except:
+                continue
+            if any(v in noms_agence for v in vals):
+                df2 = df.copy()
+                df2.columns = [str(v).strip() for v in df.iloc[i].tolist()]
+                df2 = df2.iloc[i + 1:].reset_index(drop=True)
+                df2 = df2.dropna(how="all")
+                return df2, True
+        return df, False
+    except:
+        return df, False
+
+
 def traiter_fichier_mamda(df_trait, mapping, format_date='FR'):
     """VLOOKUP : pour chaque ligne, agence -> code_agence (NA si introuvable).
     Sortie : telephone | code_agence | date."""
+    df_trait, _rep = _reparer_entete_agence(df_trait)
     col_ag = trouver_colonne_mamda(df_trait, "agence")
     if col_ag is None:
-        raise Exception("Colonne 'agence' introuvable dans le fichier traitement")
+        raise Exception("Colonne 'agence' introuvable dans le fichier traitement "
+                        f"(colonnes détectées : {_colonnes_detectees_txt(df_trait)})")
     col_tel = trouver_colonne_mamda(df_trait, "telephone")
     col_date = trouver_colonne_mamda(df_trait, "date")
     out = pd.DataFrame()
@@ -2081,6 +2124,7 @@ def _resoudre_telephone_api(df, exclure=None):
 def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     """VLOOKUP : agence -> code_agence (NA si introuvable).
     Sortie : agence | code_agence | nomClient | police | date | telephone."""
+    df_trait, _rep_api = _reparer_entete_agence(df_trait)
     col_ag = trouver_colonne_mamda(df_trait, "agence")
     if col_ag is None:
         # Fallback exports MAMDA : la colonne agence s'appelle 'raisonSocial'
@@ -2095,7 +2139,8 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
                 col_ag = c
                 break
     if col_ag is None:
-        raise Exception("Colonne 'agence' introuvable dans le fichier traitement")
+        raise Exception("Colonne 'agence' introuvable dans le fichier traitement "
+                        f"(colonnes détectées : {_colonnes_detectees_txt(df_trait)})")
     col_nom = trouver_colonne_mamda_api(df_trait, "nomClient")
     col_pol = trouver_colonne_mamda_api(df_trait, "police")
     col_date_head = trouver_colonne_mamda_api(df_trait, "date")

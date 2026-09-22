@@ -1835,7 +1835,7 @@ def _reparer_entete_agence(df):
         noms_agence = {"agence", "agences", "agency", "nom agence", "nomagence", "nom_agence",
                        "libelle agence", "libelle_agence", "libelleagence",
                        "point de vente", "point_de_vente", "nom point de vente",
-                       "raisonsocial", "raison sociale", "raison_sociale"}
+                       "raisonsocial", "raisonsociale", "raison sociale", "raison_sociale"}
         max_scan = min(8, len(df))
         for i in range(max_scan):
             try:
@@ -2046,6 +2046,29 @@ def _serie_parse_dates(serie, format_date, seuil=0.5):
         return False
 
 
+def _renommer_raisonsociale_agence(df):
+    """Renomme 'raisonSociale' en 'agence' (exports MAMDA) dès la fusion/lecture,
+    pour éviter l'erreur 'Colonne agence introuvable'. Ne fait rien si 'agence' existe déjà."""
+    try:
+        cols_n = {}
+        for c in df.columns:
+            try:
+                cols_n[c] = nettoyer_colonne_agence(c)
+            except:
+                cols_n[c] = str(c).strip().lower()
+        if any(n in ("agence", "agences", "agency", "nom agence", "nomagence", "nom_agence",
+                     "libelle agence", "libelle_agence", "libelleagence",
+                     "point de vente", "point_de_vente", "nom point de vente") for n in cols_n.values()):
+            return df
+        for c, n in cols_n.items():
+            if n in ("raisonsocial", "raisonsociale", "raison sociale", "raison_sociale"):
+                df = df.copy()
+                return df.rename(columns={c: "agence"})
+        return df
+    except:
+        return df
+
+
 def _fusionner_feuilles(feuilles):
     """Concatène un dict {nom_feuille: df} en un seul DataFrame (entête unique).
     Normalise les noms de colonnes (strip) et supprime les lignes entièrement vides."""
@@ -2067,6 +2090,7 @@ def _fusionner_feuilles(feuilles):
     if not frames:
         raise Exception("Aucune feuille exploitable dans le fichier Excel")
     fusion = pd.concat(frames, ignore_index=True, sort=False)
+    fusion = _renommer_raisonsociale_agence(fusion)
     return fusion, noms
 
 
@@ -2135,6 +2159,7 @@ def _resoudre_telephone_api(df, exclure=None):
 def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     """VLOOKUP : agence -> code_agence (NA si introuvable).
     Sortie : agence | code_agence | nomClient | police | date | telephone."""
+    df_trait = _renommer_raisonsociale_agence(df_trait)
     df_trait, _rep_api = _reparer_entete_agence(df_trait)
     col_ag = trouver_colonne_mamda(df_trait, "agence")
     if col_ag is None:
@@ -2146,7 +2171,7 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
             except:
                 cols_n[c] = str(c).strip().lower()
         for c, n in cols_n.items():
-            if n in ("raisonsocial", "raison sociale", "raison_sociale"):
+            if n in ("raisonsocial", "raisonsociale", "raison sociale", "raison_sociale"):
                 col_ag = c
                 break
     if col_ag is None:

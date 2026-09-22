@@ -1490,6 +1490,174 @@ def creer_zip_agence(fichiers):
     return buf.getvalue()
 
 
+# ==============================
+# CAT ASSURANCE — sortie simple 4 colonnes
+# police | nom | echeance | telephone
+# ==============================
+
+COLONNES_CAT = ["police", "nom", "echeance", "telephone"]
+
+
+def trouver_colonne_cat(df, kind):
+    """Retrouve la colonne source pour police / nom / echeance / telephone (insensible accents/casse)."""
+    cols_norm = {}
+    for c in df.columns:
+        try:
+            cols_norm[c] = nettoyer_colonne_agence(c)
+        except:
+            cols_norm[c] = str(c).strip().lower()
+    if kind == "police":
+        keys = ["numero_police", "numro_police", "num police", "police", "n police",
+                "npolice", "n police", "npolice"]
+        for c, n in cols_norm.items():
+            if n in keys:
+                return c
+        for c, n in cols_norm.items():
+            if "police" in n:
+                return c
+        return None
+    if kind == "nom":
+        keys = ["nom", "nom_client", "nom client", "raison sociale", "nomraison sociale",
+                "client", "nomraisonsociale", "nomrs"]
+        for c, n in cols_norm.items():
+            if n in keys:
+                return c
+        for c, n in cols_norm.items():
+            if "nom" in n or "client" in n or "raison" in n:
+                return c
+        return None
+    if kind == "echeance":
+        keys = ["date_echeance", "date echeance", "echeance", "datecheance"]
+        for c, n in cols_norm.items():
+            if n in keys:
+                return c
+        for c, n in cols_norm.items():
+            if "echeance" in n:
+                return c
+        return None
+    if kind == "telephone":
+        keys = ["telephone", "telephone_1", "tel", "gsm", "mobile", "phone", "tel_gsm"]
+        for c, n in cols_norm.items():
+            if n in keys:
+                return c
+        for c, n in cols_norm.items():
+            if "tel" in n or "gsm" in n or "phone" in n or "mobile" in n:
+                return c
+        return None
+    return None
+
+
+def formater_telephone_cat(valeur):
+    """Normalise telephone Maroc 10 chiffres avec 0 devant (0606060606). Vide -> NA."""
+    if pd.isna(valeur):
+        return "NA"
+    tel = re.sub(r"\D", "", str(valeur))
+    if not tel:
+        return "NA"
+    if tel.startswith("212") and len(tel) > 9:
+        tel = "0" + tel[3:]
+    if len(tel) == 9 and tel[0] in ['6', '7', '5']:
+        tel = "0" + tel
+    return tel if tel else "NA"
+
+
+def traiter_fichier_cat_assurance(df, format_date='FR'):
+    """Sortie CAT : 4 colonnes police/nom/echeance/telephone dans cet ordre."""
+    col_pol = trouver_colonne_cat(df, "police")
+    col_nom = trouver_colonne_cat(df, "nom")
+    col_ech = trouver_colonne_cat(df, "echeance")
+    col_tel = trouver_colonne_cat(df, "telephone")
+    out = pd.DataFrame()
+    # police : garder tel quel en string (pas de conversion numerique -> evite E+)
+    if col_pol is not None:
+        out["police"] = df[col_pol].apply(
+            lambda x: str(x).strip() if pd.notna(x) and str(x).strip() not in ("", "nan", "None", "NaT") else "NA"
+        )
+    else:
+        out["police"] = "NA"
+    # nom : NA si vide
+    if col_nom is not None:
+        out["nom"] = df[col_nom].apply(
+            lambda x: str(x).strip() if pd.notna(x) and str(x).strip() not in ("", "nan", "None", "NaT") else "NA"
+        )
+    else:
+        out["nom"] = "NA"
+    # echeance : vraie date (datetime) pour format Excel DD/MM/YYYY
+    if col_ech is not None:
+        out["echeance"] = df[col_ech].apply(lambda x: convertir_date_agence(x, format_date))
+    else:
+        out["echeance"] = pd.NaT
+    # telephone : Maroc avec 0
+    if col_tel is not None:
+        out["telephone"] = df[col_tel].apply(formater_telephone_cat)
+    else:
+        out["telephone"] = "NA"
+    out = out.reindex(columns=COLONNES_CAT)
+    return out
+
+
+def to_excel_bytes_cat(df):
+    """Export CAT : police en texte (@), echeance en date DD/MM/YYYY."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Donnees"
+    ws.sheet_view.showGridLines = False
+    bordure = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    cell_alignment = Alignment(vertical='center')
+    nb_colonnes = len(df.columns)
+    nb_lignes = len(df) + 1
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = bordure
+        cell.alignment = header_alignment
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, (col_name, value) in enumerate(zip(df.columns, row), 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if col_name == "police":
+                # Toujours texte plein : force string + format @
+                v = _clean_excel_str(str(value) if pd.notna(value) else "NA")
+                cell.value = v
+                cell.number_format = '@'
+            elif col_name == "echeance":
+                if pd.notna(value):
+                    cell.value = value
+                    cell.number_format = 'DD/MM/YYYY'
+                else:
+                    cell.value = None
+            elif col_name == "telephone":
+                v = _clean_excel_str(str(value) if pd.notna(value) else "NA")
+                cell.value = v
+                cell.number_format = '@'
+            else:
+                if pd.isna(value):
+                    cell.value = None
+                else:
+                    cell.value = _clean_excel_str(value)
+            cell.border = bordure
+            cell.alignment = cell_alignment
+    largeurs = {"police": 16, "nom": 28, "echeance": 15, "telephone": 16}
+    for col_idx, col_name in enumerate(df.columns, 1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = largeurs.get(col_name, 15)
+    ws.freeze_panes = 'A2'
+    derniere_colonne = get_column_letter(nb_colonnes)
+    ws.print_area = f'A1:{derniere_colonne}{nb_lignes}'
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def _low_col(c):
     try:
         return nettoyer_colonne_agence(c)
@@ -1772,6 +1940,78 @@ def est_police_scientifique_ou_vide(val):
     return False
 
 def app_traitement_agence():
+    format_agence = st.radio(
+        "Format de sortie :",
+        ("RMA", "CAT ASSURANCE"),
+        horizontal=True,
+        key="agence_format_choice",
+        help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone."
+    )
+    if format_agence == "CAT ASSURANCE":
+        st.markdown("Téléversez vos fichiers — sortie **CAT ASSURANCE** : `police | nom | echeance | telephone` (police en texte, echeance en date, telephone Maroc avec 0).")
+        fichiers_cat = st.file_uploader(
+            "📁 Glissez vos fichiers CAT ici",
+            type=["xlsx", "xls", "csv"],
+            accept_multiple_files=True,
+            key="agence_uploader_cat"
+        )
+        if not fichiers_cat:
+            return
+        fichiers_traites = []
+        resultats = []
+        for fichier in fichiers_cat:
+            try:
+                df_raw = lire_fichier_agence(fichier)
+                # detecter format date via colonne echeance si possible
+                col_ech_raw = trouver_colonne_cat(df_raw, "echeance")
+                fmt = detecter_format_date_agence(df_raw, col_ech_raw) if col_ech_raw is not None else 'FR'
+                df_cat = traiter_fichier_cat_assurance(df_raw, fmt)
+                base = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
+                base = re.sub(r'[\\/:*?"<>|]+', '_', base)[:50]
+                nom_sortie = f"CAT_{base}.xlsx"
+                excel_bytes = to_excel_bytes_cat(df_cat)
+                fichiers_traites.append((nom_sortie, excel_bytes))
+                resultats.append({"Source": fichier.name, "Lignes": len(df_cat), "Sortie": nom_sortie, "Statut": "✅ OK"})
+                with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_cat)} lignes)", expanded=False):
+                    st.dataframe(df_cat.head(10), use_container_width=True, hide_index=True)
+            except Exception as e:
+                resultats.append({"Source": fichier.name, "Lignes": 0, "Sortie": "-", "Statut": f"❌ {e}"})
+        st.markdown("---")
+        st.subheader("📊 Résumé")
+        st.dataframe(pd.DataFrame(resultats), use_container_width=True, hide_index=True)
+        if fichiers_traites:
+            st.markdown("---")
+            st.subheader("💾 Téléchargement")
+            if len(fichiers_traites) == 1:
+                nom, data = fichiers_traites[0]
+                st.download_button(
+                    f"📥 Télécharger {nom}",
+                    data=data,
+                    file_name=nom,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="cat_dl_single"
+                )
+            else:
+                st.download_button(
+                    f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers)",
+                    data=creer_zip_agence(fichiers_traites),
+                    file_name=f"CAT_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="cat_dl_zip"
+                )
+                for i, (nom, data) in enumerate(fichiers_traites):
+                    st.download_button(
+                        f"📥 {nom}",
+                        data=data,
+                        file_name=nom,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"cat_dl_{i}"
+                    )
+        return
     st.markdown("Téléversez vos fichiers d'agence (Excel, CSV, TSV, .xls déguisé) — détection automatique de l'agence via les 4 premiers chiffres du N° Police.")
     fichiers_upload = st.file_uploader(
         "📁 Glissez vos fichiers ici",
@@ -2070,7 +2310,7 @@ def app_traitement_agence():
                         df_traite = traiter_fichier_agence(f['df'].copy(), f['nom_agence'], f['format_date'], f['code_base_effectif'], _mois_c, _annee_c, bool(f.get('force_regenerer', False)))
                         mois = detecter_mois_echeance_agence(f['df'], f['format_date'])
                         # Le nom de sortie garde le mois d'echeance detecte, mais le N° Police utilise mois/annee en cours
-                        nom_sortie = f"ASSURCALL_{nettoyer_nom_fichier_agence(f['nom_agence'])}_{mois}.xlsx"
+                        nom_sortie = f"RMA_{nettoyer_nom_fichier_agence(f['nom_agence'])}_{mois}.xlsx"
                         excel_bytes = to_excel_bytes_agence(df_traite)
                         fichiers_traites.append((nom_sortie, excel_bytes))
                         resultats.append({
@@ -2120,7 +2360,7 @@ def app_traitement_agence():
                         st.download_button(
                             f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers)",
                             data=creer_zip_agence(fichiers_traites),
-                            file_name=f"ASSURCALL_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                            file_name=f"RMA_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                             mime="application/zip",
                             type="primary",
                             use_container_width=True,
@@ -3299,7 +3539,7 @@ if app_choice == "EQDOM_MARKETING":
     app_hero("EQDOM · Marketing", "Normalisation & déduplication de fichiers Excel marketing")
     app_eqdom_marketing()
 elif app_choice == "TRAITEMENT_AGENCE":
-    app_hero("Traitement Fichiers Agence", "Détection automatique agence & mise en forme ASSURCALL")
+    app_hero("Traitement Fichiers Agence", "RMA & CAT ASSURANCE — Détection auto & mise en forme")
     app_traitement_agence()
 elif app_choice == "BOA_MARKETING":
     app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")

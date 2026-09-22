@@ -1889,7 +1889,18 @@ def traiter_fichier_mamda(df_trait, mapping, format_date='FR'):
     else:
         out["date"] = pd.NaT
     out = out.reindex(columns=COLONNES_MAMDA)
-    return out
+    # Agences manquantes (pour affichage : quelles agences ajouter à la liste)
+    mask_na_m = out["code_agence"].astype(str).str.upper() == "NA"
+    try:
+        noms_manq_m = df_trait.loc[mask_na_m, col_ag].astype(str).str.strip()
+        noms_manq_m = noms_manq_m[~noms_manq_m.isin(["", "nan", "None", "NaT"])]
+        if len(noms_manq_m) < int(mask_na_m.sum()):
+            noms_manq_m = pd.concat([noms_manq_m, pd.Series(["(agence vide)"] * (int(mask_na_m.sum()) - len(noms_manq_m)))])
+    except:
+        noms_manq_m = pd.Series(dtype=str)
+    infos_m = {"nb_na": int(mask_na_m.sum()),
+               "agences_manquantes": noms_manq_m.value_counts().to_dict() if len(noms_manq_m) else {}}
+    return out, infos_m
 
 
 def to_excel_bytes_mamda(df):
@@ -2202,6 +2213,16 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_MAMDA_API)
+    mask_na_api = out["code_agence"].astype(str).str.upper() == "NA"
+    try:
+        noms_api = df_trait.loc[mask_na_api, col_ag].astype(str).str.strip()
+        noms_api = noms_api[~noms_api.isin(["", "nan", "None", "NaT"])]
+        if len(noms_api) < int(mask_na_api.sum()):
+            noms_api = pd.concat([noms_api, pd.Series(["(agence vide)"] * (int(mask_na_api.sum()) - len(noms_api)))])
+    except:
+        noms_api = pd.Series(dtype=str)
+    infos["nb_na"] = int(mask_na_api.sum())
+    infos["agences_manquantes"] = noms_api.value_counts().to_dict() if len(noms_api) else {}
     return out, infos
 
 
@@ -2717,7 +2738,7 @@ def app_traitement_agence():
                     fmt_m = detecter_format_date_agence(df_raw_m, _cd) if _cd is not None else 'FR'
                 except:
                     pass
-                df_m = traiter_fichier_mamda(df_raw_m, mapping_mamda, fmt_m)
+                df_m, info_m = traiter_fichier_mamda(df_raw_m, mapping_mamda, fmt_m)
                 nb_na = int((df_m["code_agence"].astype(str).str.upper() == "NA").sum())
                 if nom_custom_m_clean:
                     if len(fichiers_mamda) == 1:
@@ -2736,6 +2757,9 @@ def app_traitement_agence():
                     _na_rows = df_m[df_m["code_agence"].astype(str).str.upper() == "NA"]
                     na_global.append((_fichier_nom := fichier.name, _na_rows))
                     st.warning(f"⚠️ {fichier.name} : **{nb_na}** ligne(s) avec NA (agence absente de la liste) — voir ci-dessous avant de télécharger")
+                    _manq_m = (info_m or {}).get("agences_manquantes") or {}
+                    if _manq_m:
+                        st.error(f"⛔ Agences à ajouter dans la liste ({len(_manq_m)}) : " + ", ".join([f"{k} ({v})" for k, v in sorted(_manq_m.items(), key=lambda x: -x[1])[:20]]))
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_dl)} lignes)", expanded=False):
                     st.dataframe(df_dl.head(10), use_container_width=True, hide_index=True)
             except Exception as e:
@@ -2874,6 +2898,9 @@ def app_traitement_agence():
                     _na_a = df_a[df_a["code_agence"].astype(str).str.upper() == "NA"]
                     na_global_a.append((fichier.name, _na_a))
                     st.warning(f"⚠️ {fichier.name} : **{nb_na_a}** ligne(s) avec NA (agence absente de la liste) — voir ci-dessous avant de télécharger")
+                    _manq_a = (info_a or {}).get("agences_manquantes") or {}
+                    if _manq_a:
+                        st.error(f"⛔ Agences à ajouter dans la liste ({len(_manq_a)}) : " + ", ".join([f"{k} ({v})" for k, v in sorted(_manq_a.items(), key=lambda x: -x[1])[:20]]))
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_dl_a)} lignes)", expanded=False):
                     st.dataframe(df_dl_a.head(10), use_container_width=True, hide_index=True)
             except Exception as e:

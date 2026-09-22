@@ -1219,15 +1219,59 @@ def detecter_mois_echeance_agence(df, format_date='FR'):
             mois[k] = mois.get(k, 0) + 1
     return max(mois, key=mois.get) if mois else datetime.now().strftime("%m%Y")
 
-def formater_telephone_agence(valeur):
-    if pd.isna(valeur):
-        return "NA"
-    tel = re.sub(r"\D", "", str(valeur))
+def _normaliser_un_numero_maroc(digits):
+    """Normalise un bloc de chiffres en numero Marocain 0XXXXXXXXX si possible."""
+    tel = re.sub(r"\D", "", str(digits or ""))
+    if not tel:
+        return ""
     if tel.startswith("212") and len(tel) > 9:
         tel = "0" + tel[3:]
     if len(tel) == 9 and tel[0] in ['6', '7', '5']:
         tel = "0" + tel
-    return tel if tel else "NA"
+    return tel
+
+
+def _choisir_meilleur_telephone(valeur):
+    """Prend le bon numero si 2 numeros avec / ; , | etc. Priorite mobile 06/07, puis 05.
+    Ex: '0606060606/0611111111' -> '0606060606' (premier valide). Vide -> 'NA'."""
+    if pd.isna(valeur):
+        return "NA"
+    brut = str(valeur).strip()
+    if not brut or brut.lower() in ("nan", "none", "nat"):
+        return "NA"
+    # 1) decouper sur separateurs explicites (pas l'espace : '06 60 60 60 60' est UN numero)
+    morceaux = re.split(r'[\/\\|;,]+', brut)
+    candidats = []
+    for m in morceaux:
+        m = m.strip()
+        if not m:
+            continue
+        tel = _normaliser_un_numero_maroc(m)
+        if not tel:
+            continue
+        # Si le morceau colle 2 numeros (ex: '0606060606 0611111111' -> 20 chiffres),
+        # redecouper en numeros valides 0[5-7]XXXXXXXX
+        if len(tel) > 10:
+            trouves = re.findall(r'0[5-7]\d{8}', tel)
+            if trouves:
+                candidats.extend(trouves)
+                continue
+        candidats.append(tel)
+    if not candidats:
+        return "NA"
+    valides = [c for c in candidats if len(c) == 10 and c.startswith("0") and c[1] in "567"]
+    if valides:
+        # Priorite : 06/07 (mobile) d'abord, puis 05
+        mobiles = [c for c in valides if c[1] in "67"]
+        if mobiles:
+            return mobiles[0]
+        return valides[0]
+    # Aucun valide strict : garder le premier non vide (ne pas perdre la donnee)
+    return candidats[0] if candidats[0] else "NA"
+
+
+def formater_telephone_agence(valeur):
+    return _choisir_meilleur_telephone(valeur)
 
 def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermediaire=None, mois_courant=None, annee_courante=None, force_regenerer_tous=False):
     # Conserver df original pour extraction si besoin (deja fait en amont)
@@ -1548,17 +1592,8 @@ def trouver_colonne_cat(df, kind):
 
 
 def formater_telephone_cat(valeur):
-    """Normalise telephone Maroc 10 chiffres avec 0 devant (0606060606). Vide -> NA."""
-    if pd.isna(valeur):
-        return "NA"
-    tel = re.sub(r"\D", "", str(valeur))
-    if not tel:
-        return "NA"
-    if tel.startswith("212") and len(tel) > 9:
-        tel = "0" + tel[3:]
-    if len(tel) == 9 and tel[0] in ['6', '7', '5']:
-        tel = "0" + tel
-    return tel if tel else "NA"
+    """Normalise telephone Maroc 10 chiffres avec 0 devant (0606060606). 2 numeros avec / -> garde le bon. Vide -> NA."""
+    return _choisir_meilleur_telephone(valeur)
 
 
 def traiter_fichier_cat_assurance(df, format_date='FR'):

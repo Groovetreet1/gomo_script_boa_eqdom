@@ -1622,12 +1622,15 @@ def traiter_fichier_cat_assurance(df, format_date='FR'):
         out["echeance"] = df[col_ech].apply(lambda x: convertir_date_agence(x, format_date))
     else:
         out["echeance"] = pd.NaT
-    # telephone : Maroc avec 0
+    # telephone : Maroc avec 0 (2 numeros avec / -> le bon)
     if col_tel is not None:
         out["telephone"] = df[col_tel].apply(formater_telephone_cat)
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_CAT)
+    # Telephone khawi (NA/vide) -> nms7 ster kamel bach maydirch mochkil
+    _tel = out["telephone"].astype(str).str.strip()
+    out = out[~(_tel.isna() | (_tel == "") | (_tel.str.upper() == "NA") | (_tel.str.upper() == "NAT"))].reset_index(drop=True)
     return out
 
 
@@ -2020,6 +2023,7 @@ def app_traitement_agence():
                 col_ech_raw = trouver_colonne_cat(df_raw, "echeance")
                 fmt = detecter_format_date_agence(df_raw, col_ech_raw) if col_ech_raw is not None else 'FR'
                 df_cat = traiter_fichier_cat_assurance(df_raw, fmt)
+                nb_suppr = len(df_raw) - len(df_cat)
                 if nom_custom_clean:
                     if len(fichiers_cat) == 1:
                         nom_sortie = f"CAT_{nom_custom_clean}_{mmyyyy}.xlsx"
@@ -2032,6 +2036,8 @@ def app_traitement_agence():
                 excel_bytes = to_excel_bytes_cat(df_cat)
                 fichiers_traites.append((nom_sortie, excel_bytes))
                 resultats.append({"Source": fichier.name, "Lignes": len(df_cat), "Sortie": nom_sortie, "Statut": "✅ OK"})
+                if nb_suppr > 0:
+                    st.warning(f"🧹 {fichier.name} : {nb_suppr} ligne(s) msa7a (telephone khawi)")
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_cat)} lignes)", expanded=False):
                     st.dataframe(df_cat.head(10), use_container_width=True, hide_index=True)
             except Exception as e:

@@ -1518,12 +1518,12 @@ def trouver_colonne_cat(df, kind):
         return None
     if kind == "nom":
         keys = ["nom", "nom_client", "nom client", "raison sociale", "nomraison sociale",
-                "client", "nomraisonsociale", "nomrs"]
+                "client", "nomraisonsociale", "nomrs", "name", "full name", "fullname"]
         for c, n in cols_norm.items():
             if n in keys:
                 return c
         for c, n in cols_norm.items():
-            if "nom" in n or "client" in n or "raison" in n:
+            if "nom" in n or "client" in n or "raison" in n or "name" in n:
                 return c
         return None
     if kind == "echeance":

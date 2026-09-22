@@ -1901,6 +1901,164 @@ def to_excel_bytes_mamda(df):
     return output.getvalue()
 
 
+# ==============================
+# MAMDA API — VLOOKUP agence -> code_agence
+# sortie : agence | code_agence | nomClient | police | date | telephone
+# ==============================
+
+COLONNES_MAMDA_API = ["agence", "code_agence", "nomClient", "police", "date", "telephone"]
+
+
+def trouver_colonne_mamda_api(df, kind):
+    """Retrouve colonne pour MAMDA API (agence/code via mamda, nomClient/police specifiques)."""
+    if kind in ("agence", "code_agence", "telephone", "date"):
+        return trouver_colonne_mamda(df, kind)
+    if kind == "police":
+        return trouver_colonne_cat(df, "police")
+    if kind == "nomClient":
+        cols_norm = {}
+        for c in df.columns:
+            try:
+                cols_norm[c] = nettoyer_colonne_agence(c)
+            except:
+                cols_norm[c] = str(c).strip().lower()
+        for c, n in cols_norm.items():
+            if n in ("nomclient", "nom client", "nom_client"):
+                return c
+        for c, n in cols_norm.items():
+            if "nomclient" in n:
+                return c
+        col_ag = trouver_colonne_mamda(df, "agence")
+        for c, n in cols_norm.items():
+            if c == col_ag:
+                continue
+            if n in ("nom", "name"):
+                return c
+        for c, n in cols_norm.items():
+            if c == col_ag:
+                continue
+            if "code" in n or "tel" in n or "gsm" in n or "date" in n or "police" in n or "echeance" in n:
+                continue
+            if "nom" in n or "client" in n or "name" in n or "raison" in n:
+                return c
+        return None
+    return None
+
+
+def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
+    """VLOOKUP : agence -> code_agence (NA si introuvable).
+    Sortie : agence | code_agence | nomClient | police | date | telephone."""
+    col_ag = trouver_colonne_mamda_api(df_trait, "agence")
+    if col_ag is None:
+        raise Exception("Colonne 'agence' introuvable dans le fichier traitement")
+    col_nom = trouver_colonne_mamda_api(df_trait, "nomClient")
+    col_pol = trouver_colonne_mamda_api(df_trait, "police")
+    col_tel = trouver_colonne_mamda_api(df_trait, "telephone")
+    col_date = trouver_colonne_mamda_api(df_trait, "date")
+    out = pd.DataFrame()
+
+    def _txt(v):
+        if pd.isna(v):
+            return "NA"
+        s = str(v).strip()
+        return s if s and s.lower() not in ("nan", "none", "nat") else "NA"
+
+    out["agence"] = df_trait[col_ag].apply(_txt)
+    codes = []
+    for v in df_trait[col_ag]:
+        trouve = "NA"
+        for k in _cles_agence(v):
+            if k in mapping:
+                trouve = mapping[k]
+                break
+        codes.append(trouve)
+    out["code_agence"] = codes
+    if col_nom is not None:
+        out["nomClient"] = df_trait[col_nom].apply(_txt)
+    else:
+        out["nomClient"] = "NA"
+    if col_pol is not None:
+        out["police"] = df_trait[col_pol].apply(_txt)
+    else:
+        out["police"] = "NA"
+    if col_date is not None:
+        def _conv_date(x):
+            if pd.isna(x) or str(x).strip() in ("", "nan", "None", "NaT"):
+                return pd.NaT
+            d = convertir_date_agence(x, format_date)
+            if pd.notna(d):
+                return d
+            return str(x).strip()
+        out["date"] = df_trait[col_date].apply(_conv_date)
+    else:
+        out["date"] = pd.NaT
+    if col_tel is not None:
+        out["telephone"] = df_trait[col_tel].apply(formater_telephone_cat)
+    else:
+        out["telephone"] = "NA"
+    out = out.reindex(columns=COLONNES_MAMDA_API)
+    return out
+
+
+def to_excel_bytes_mamda_api(df):
+    """Export MAMDA API : police + telephone en texte (@), date en DD/MM/YYYY si vraie date."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Donnees"
+    ws.sheet_view.showGridLines = False
+    bordure = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    cell_alignment = Alignment(vertical='center')
+    nb_colonnes = len(df.columns)
+    nb_lignes = len(df) + 1
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = bordure
+        cell.alignment = header_alignment
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, (col_name, value) in enumerate(zip(df.columns, row), 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if col_name in ("police", "telephone"):
+                v = _clean_excel_str(str(value) if pd.notna(value) else "NA")
+                cell.value = v
+                cell.number_format = '@'
+            elif col_name == "date":
+                if isinstance(value, (datetime, pd.Timestamp)) and pd.notna(value):
+                    cell.value = value
+                    cell.number_format = 'DD/MM/YYYY'
+                elif pd.isna(value):
+                    cell.value = None
+                else:
+                    cell.value = _clean_excel_str(value)
+            else:
+                if pd.isna(value):
+                    cell.value = None
+                else:
+                    cell.value = _clean_excel_str(value)
+            cell.border = bordure
+            cell.alignment = cell_alignment
+    largeurs = {"agence": 24, "code_agence": 30, "nomClient": 24, "police": 15, "date": 15, "telephone": 16}
+    for col_idx, col_name in enumerate(df.columns, 1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = largeurs.get(col_name, 15)
+    ws.freeze_panes = 'A2'
+    derniere_colonne = get_column_letter(nb_colonnes)
+    ws.print_area = f'A1:{derniere_colonne}{nb_lignes}'
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def _low_col(c):
     try:
         return nettoyer_colonne_agence(c)
@@ -2185,10 +2343,10 @@ def est_police_scientifique_ou_vide(val):
 def app_traitement_agence():
     format_agence = st.radio(
         "Format de sortie :",
-        ("RMA", "CAT ASSURANCE", "MAMDA Assurance Admin"),
+        ("RMA", "CAT ASSURANCE", "MAMDA Assurance Admin", "MAMDA API"),
         horizontal=True,
         key="agence_format_choice",
-        help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone. MAMDA = VLOOKUP agence -> code_agence (telephone / code_agence / date)."
+        help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone. MAMDA Assurance Admin = VLOOKUP telephone / code_agence / date. MAMDA API = VLOOKUP agence / code_agence / nomClient / police / date / telephone."
     )
     if format_agence == "CAT ASSURANCE":
         st.markdown("Téléversez vos fichiers — sortie **CAT ASSURANCE** : `police | nom | echeance | telephone` (police en texte, echeance en date, telephone Maroc avec 0).")
@@ -2418,6 +2576,140 @@ def app_traitement_agence():
                         file_name=nom,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"mamda_dl_{i}"
+                    )
+        return
+    if format_agence == "MAMDA API":
+        st.markdown("**MAMDA API** — VLOOKUP `agence -> code_agence`. Sortie : `agence | code_agence | nomClient | police | date | telephone`. Les lignes `NA` kaybanou 9bel download.")
+        st.markdown("##### Étape 1 : Liste agences MAMDA (2 colonnes : `agence` | `code_agence`)")
+        ref_api = st.file_uploader(
+            "📁 Uploadi liste agences MAMDA",
+            type=["xlsx", "xls", "csv"],
+            accept_multiple_files=False,
+            key="mamda_api_uploader_ref"
+        )
+        if ref_api is not None:
+            try:
+                df_ref_api = lire_fichier_agence(ref_api)
+                mapping_api = construire_mapping_mamda(df_ref_api)
+                st.success(f"✅ {len(mapping_api)} agence(s) chargée(s) depuis {ref_api.name}")
+                with st.expander("👀 Aperçu agences MAMDA", expanded=False):
+                    st.dataframe(
+                        pd.DataFrame([{"agence": k, "code_agence": v} for k, v in sorted(mapping_api.items())]).head(20),
+                        use_container_width=True, hide_index=True
+                    )
+            except Exception as e:
+                st.error(f"❌ Fichier agences illisible : {e}")
+                return
+        else:
+            st.info("Uploadi la liste `agence | code_agence` bach tkemel.")
+        st.markdown("##### Étape 2 : Fichier(s) traitement (colonnes `agence` + `nomClient` + `police` + `date` + `telephone`)")
+        fichiers_api = st.file_uploader(
+            "📁 Glissez vos fichiers traitement ici",
+            type=["xlsx", "xls", "csv"],
+            accept_multiple_files=True,
+            key="mamda_api_uploader_trait"
+        )
+        if ref_api is None or not fichiers_api:
+            return
+        # MMYYYY = mois prochain (ex: on est en 09 -> 102026)
+        _now_a = datetime.now()
+        _mp_a = _now_a.month + 1
+        _yp_a = _now_a.year
+        if _mp_a > 12:
+            _mp_a = 1
+            _yp_a += 1
+        mmyyyy_a = f"{_mp_a:02d}{_yp_a}"
+        nom_custom_a = st.text_input(
+            "✏️ Smia dial fichier (ex: MAMDA_API)",
+            placeholder="MAMDA_API",
+            key="mamda_api_nom_fichier",
+            help="Ghadi tkhrj lik automatiquement : MAMDA_API_SMIA_MMYYYY.xlsx (MMYYYY = chhar jay)"
+        ).strip()
+        nom_custom_a_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom_a).strip().replace(" ", "_").upper()[:50]
+        if nom_custom_a_clean:
+            st.caption(f"Aperçu nom : **MAMDA_API_{nom_custom_a_clean}_{mmyyyy_a}.xlsx**")
+        msa7_na_a = st.checkbox(
+            "🧹 Msa7 les lignes li fihom NA (code_agence) 9bel download",
+            value=False,
+            key="mamda_api_msa7_na",
+            help="Kheliha me7loula bach tchouf NA lowla ou tzid agences na9sa, ou cocheha bach tmsa7hom"
+        )
+        fichiers_traites_a = []
+        resultats_a = []
+        na_global_a = []
+        for idx_a, fichier in enumerate(fichiers_api):
+            try:
+                df_raw_a = lire_fichier_agence(fichier)
+                fmt_a = 'FR'
+                try:
+                    _cd_a = trouver_colonne_mamda_api(df_raw_a, "date")
+                    fmt_a = detecter_format_date_agence(df_raw_a, _cd_a) if _cd_a is not None else 'FR'
+                except:
+                    pass
+                df_a = traiter_fichier_mamda_api(df_raw_a, mapping_api, fmt_a)
+                nb_na_a = int((df_a["code_agence"].astype(str).str.upper() == "NA").sum())
+                if nom_custom_a_clean:
+                    if len(fichiers_api) == 1:
+                        nom_sortie_a = f"MAMDA_API_{nom_custom_a_clean}_{mmyyyy_a}.xlsx"
+                    else:
+                        nom_sortie_a = f"MAMDA_API_{nom_custom_a_clean}_{idx_a + 1}_{mmyyyy_a}.xlsx"
+                else:
+                    base_a = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
+                    base_a = re.sub(r'[\\/:*?"<>|]+', '_', base_a)[:50]
+                    nom_sortie_a = f"MAMDA_API_{base_a}_{mmyyyy_a}.xlsx"
+                df_dl_a = df_a[df_a["code_agence"].astype(str).str.upper() != "NA"].reset_index(drop=True) if msa7_na_a else df_a
+                excel_a = to_excel_bytes_mamda_api(df_dl_a)
+                fichiers_traites_a.append((nom_sortie_a, excel_a))
+                resultats_a.append({"Source": fichier.name, "Lignes": len(df_a), "NA": nb_na_a, "Sortie": nom_sortie_a, "Statut": "✅ OK"})
+                if nb_na_a > 0:
+                    _na_a = df_a[df_a["code_agence"].astype(str).str.upper() == "NA"]
+                    na_global_a.append((fichier.name, _na_a))
+                    st.warning(f"⚠️ {fichier.name} : **{nb_na_a}** ligne(s) fiha NA (agence ma kaynach f liste) — chouf ta7t 9bel ma t-téléchargi")
+                with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_dl_a)} lignes)", expanded=False):
+                    st.dataframe(df_dl_a.head(10), use_container_width=True, hide_index=True)
+            except Exception as e:
+                resultats_a.append({"Source": fichier.name, "Lignes": 0, "NA": "-", "Sortie": "-", "Statut": f"❌ {e}"})
+        if na_global_a:
+            st.markdown("---")
+            st.subheader("🔍 Lignes NA — agences na9sa (zidhom f liste wla coche Msa7)")
+            for _fn_a, _nr_a in na_global_a:
+                with st.expander(f"❌ NA f {_fn_a} ({len(_nr_a)} lignes)", expanded=True):
+                    st.dataframe(_nr_a, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("📊 Résumé")
+        st.dataframe(pd.DataFrame(resultats_a), use_container_width=True, hide_index=True)
+        if fichiers_traites_a:
+            st.markdown("---")
+            st.subheader("💾 Téléchargement")
+            if len(fichiers_traites_a) == 1:
+                nom, data = fichiers_traites_a[0]
+                st.download_button(
+                    f"📥 Télécharger {nom}",
+                    data=data,
+                    file_name=nom,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="mamda_api_dl_single"
+                )
+            else:
+                zip_a = f"MAMDA_API_{nom_custom_a_clean}_{mmyyyy_a}.zip" if nom_custom_a_clean else f"MAMDA_API_BATCH_{mmyyyy_a}.zip"
+                st.download_button(
+                    f"📦 Télécharger ZIP ({len(fichiers_traites_a)} fichiers)",
+                    data=creer_zip_agence(fichiers_traites_a),
+                    file_name=zip_a,
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="mamda_api_dl_zip"
+                )
+                for i, (nom, data) in enumerate(fichiers_traites_a):
+                    st.download_button(
+                        f"📥 {nom}",
+                        data=data,
+                        file_name=nom,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"mamda_api_dl_{i}"
                     )
         return
     st.markdown("Téléversez vos fichiers d'agence (Excel, CSV, TSV, .xls déguisé) — détection automatique de l'agence via les 4 premiers chiffres du N° Police.")
@@ -3947,7 +4239,7 @@ if app_choice == "EQDOM_MARKETING":
     app_hero("EQDOM · Marketing", "Normalisation & déduplication de fichiers Excel marketing")
     app_eqdom_marketing()
 elif app_choice == "TRAITEMENT_AGENCE":
-    app_hero("Traitement Fichiers Agence", "RMA · CAT ASSURANCE · MAMDA Assurance Admin — Détection auto & mise en forme")
+    app_hero("Traitement Fichiers Agence", "RMA · CAT · MAMDA Admin · MAMDA API — Détection auto & mise en forme")
     app_traitement_agence()
 elif app_choice == "BOA_MARKETING":
     app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")

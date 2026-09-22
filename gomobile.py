@@ -2238,6 +2238,12 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_MAMDA_API)
+    # Telephone vide (NA/vide) -> supprimer la ligne directement
+    _tel_api = out["telephone"].astype(str).str.strip()
+    _mask_tel_vide = (_tel_api.isna() | (_tel_api == "") | (_tel_api.str.upper() == "NA") | (_tel_api.str.upper() == "NAT"))
+    nb_tel_suppr = int(_mask_tel_vide.sum())
+    if nb_tel_suppr:
+        out = out[~_mask_tel_vide].reset_index(drop=True)
     mask_na_api = out["code_agence"].astype(str).str.upper() == "NA"
     try:
         noms_api = df_trait.loc[mask_na_api, col_ag].astype(str).str.strip()
@@ -2247,6 +2253,7 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     except:
         noms_api = pd.Series(dtype=str)
     infos["nb_na"] = int(mask_na_api.sum())
+    infos["tel_supprimes"] = nb_tel_suppr
     infos["agences_manquantes"] = noms_api.value_counts().to_dict() if len(noms_api) else {}
     return out, infos
 
@@ -2904,7 +2911,9 @@ def app_traitement_agence():
                     pass
                 df_a, info_a = traiter_fichier_mamda_api(df_raw_a, mapping_api, fmt_a)
                 if info_a.get("layout") == "decale":
-                    st.info("🔀 Layout détecté : `raisonSocial`→agence, `nomClient`→police, `police`→date, `Primenette`→téléphone")
+                    st.info("🔀 Layout détecté : `raisonSociale`→agence, `nomClient`→police, `police`→date, `Primenette`→téléphone")
+                if info_a.get("tel_supprimes", 0) > 0:
+                    st.warning(f"🧹 {fichier.name} : **{info_a['tel_supprimes']}** ligne(s) supprimée(s) (téléphone vide)")
                 nb_na_a = int((df_a["code_agence"].astype(str).str.upper() == "NA").sum())
                 if nom_custom_a_clean:
                     if len(fichiers_api) == 1:

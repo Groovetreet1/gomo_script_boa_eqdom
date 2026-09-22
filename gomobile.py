@@ -1591,6 +1591,40 @@ def trouver_colonne_cat(df, kind):
     return None
 
 
+def formater_telephone_api(valeur):
+    """Téléphone MAMDA API : 9 chiffres sans le 0 initial (ex: 608569591).
+    2 numéros avec / -> garde le bon. Vide -> NA."""
+    if pd.isna(valeur):
+        return "NA"
+    brut = str(valeur).strip()
+    if not brut or brut.lower() in ("nan", "none", "nat"):
+        return "NA"
+    morceaux = re.split(r'[\/\\|;,]+', brut)
+    candidats = []
+    for m in morceaux:
+        tel = re.sub(r"\D", "", m.strip())
+        if not tel:
+            continue
+        if tel.startswith("212") and len(tel) > 9:
+            tel = tel[3:]
+        if len(tel) == 10 and tel.startswith("0"):
+            tel = tel[1:]
+        if len(tel) > 9:
+            trouves = re.findall(r'[5-7]\d{8}', tel)
+            if trouves:
+                candidats.extend(trouves)
+                continue
+        candidats.append(tel)
+    candidats = [c for c in candidats if c]
+    if not candidats:
+        return "NA"
+    valides = [c for c in candidats if len(c) == 9 and c[0] in "567"]
+    if valides:
+        mobiles = [c for c in valides if c[0] in "67"]
+        return mobiles[0] if mobiles else valides[0]
+    return candidats[0]
+
+
 def formater_telephone_cat(valeur):
     """Normalise telephone Maroc 10 chiffres avec 0 devant (0606060606). 2 numeros avec / -> garde le bon. Vide -> NA."""
     return _choisir_meilleur_telephone(valeur)
@@ -2234,7 +2268,7 @@ def traiter_fichier_mamda_api(df_trait, mapping, format_date='FR'):
     else:
         out["date"] = pd.NaT
     if col_tel_src is not None:
-        out["telephone"] = df_trait[col_tel_src].apply(formater_telephone_cat)
+        out["telephone"] = df_trait[col_tel_src].apply(formater_telephone_api)
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_MAMDA_API)

@@ -1390,7 +1390,7 @@ def traiter_fichier_agence(df, nom_agence, format_date='FR', code_base_intermedi
             # CIN / Nom/Raison sociale / Usage / autres : vide -> NA
             df[col] = df[col].apply(lambda x: "NA" if pd.isna(x) or str(x).strip() == "" else x)
     df = df.reindex(columns=MODELE_COLONNES)
-    # === N° Police : garder si déjà m9ada, régénérer seulement si scientifique/vide/NA (sans doublons) ===
+    # === N° Police : conserver si déjà correct, régénérer seulement si scientifique/vide/NA (sans doublons) ===
     # Si force_regenerer_tous (cas double code ancien+nouveau) : tout régénérer à partir de 0 (00001)
     if code_base_intermediaire is not None:
         try:
@@ -1628,7 +1628,7 @@ def traiter_fichier_cat_assurance(df, format_date='FR'):
     else:
         out["telephone"] = "NA"
     out = out.reindex(columns=COLONNES_CAT)
-    # Telephone khawi (NA/vide) -> nms7 ster kamel bach maydirch mochkil
+    # Téléphone vide (NA/vide) -> supprimer la ligne entière pour éviter les problèmes
     _tel = out["telephone"].astype(str).str.strip()
     out = out[~(_tel.isna() | (_tel == "") | (_tel.str.upper() == "NA") | (_tel.str.upper() == "NAT"))].reset_index(drop=True)
     return out
@@ -2109,7 +2109,7 @@ def _code_intermediaire_si_dans_mapping(df, num2code):
 def _mismatch_police_intermediaire(df, num2code):
     """Cas Mondial : N° Police mixtes (ex: 8029 + 6701) alors qu'Intermediaire = 6701 (dans mapping).
     Retourne (mismatch: bool, code_inter: str|None, groupes: dict). Ne compte que les polices
-    m9ada (pas scientifiques/vides). Seuil : groupe divergent >=2 lignes pour ignorer coquilles.
+    correctes (ni scientifiques ni vides). Seuil : groupe divergent >=2 lignes pour ignorer les coquilles.
     """
     try:
         try:
@@ -2326,7 +2326,7 @@ def generer_numeros_police(code_base, n, mois=None, annee=None):
     return [f"{base}{i:05d}" for i in range(1, n+1)]
 
 def est_police_scientifique_ou_vide(val):
-    """Retourne True si N° Police doit être régénéré : vide/NA ou format scientifique (5,86E+14). Sinon False (garder l'original m9ada)."""
+    """Retourne True si N° Police doit être régénéré : vide/NA ou format scientifique (5,86E+14). Sinon False (conserver l'original tel quel)."""
     if pd.isna(val) or val is None:
         return True
     s = str(val).strip()
@@ -2367,16 +2367,16 @@ def app_traitement_agence():
             _yp += 1
         mmyyyy = f"{_mp:02d}{_yp}"
         nom_custom = st.text_input(
-            "✏️ Smia dial fichier (ex: MOUAATAMID)",
+            "✏️ Nom du fichier (ex : MOUAATAMID)",
             placeholder="MOUAATAMID",
             key="cat_nom_fichier",
-            help="Ghadi tkhrj lik automatiquement : CAT_MOUAATAMID_MMYYYY.xlsx (MMYYYY = chhar jay)"
+            help="Nom généré automatiquement : CAT_MOUAATAMID_MMYYYY.xlsx (MMYYYY = mois prochain)"
         ).strip()
         nom_custom_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom).strip().replace(" ", "_").upper()[:50]
         if nom_custom_clean:
-            st.caption(f"Aperçu nom : **CAT_{nom_custom_clean}_{mmyyyy}.xlsx**")
+            st.caption(f"Aperçu du nom : **CAT_{nom_custom_clean}_{mmyyyy}.xlsx**")
         else:
-            st.caption(f"MMYYYY (chhar jay) : **{mmyyyy}** — kteb smia lfo9 bach tkhrj CAT_SMIA_{mmyyyy}.xlsx")
+            st.caption(f"MMYYYY (mois prochain) : **{mmyyyy}** — saisissez un nom ci-dessus pour obtenir CAT_NOM_{mmyyyy}.xlsx")
         fichiers_traites = []
         resultats = []
         for idx_cat, fichier in enumerate(fichiers_cat):
@@ -2400,7 +2400,7 @@ def app_traitement_agence():
                 fichiers_traites.append((nom_sortie, excel_bytes))
                 resultats.append({"Source": fichier.name, "Lignes": len(df_cat), "Sortie": nom_sortie, "Statut": "✅ OK"})
                 if nb_suppr > 0:
-                    st.warning(f"🧹 {fichier.name} : {nb_suppr} ligne(s) msa7a (telephone khawi)")
+                    st.warning(f"🧹 {fichier.name} : {nb_suppr} ligne(s) supprimée(s) (téléphone vide)")
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_cat)} lignes)", expanded=False):
                     st.dataframe(df_cat.head(10), use_container_width=True, hide_index=True)
             except Exception as e:
@@ -2443,10 +2443,10 @@ def app_traitement_agence():
                     )
         return
     if format_agence == "MAMDA Assurance Admin":
-        st.markdown("**MAMDA Assurance Admin** — VLOOKUP `agence -> code_agence`. Sortie : `telephone | code_agence | date`. Les lignes `NA` kaybanou 9bel download.")
+        st.markdown("**MAMDA Assurance Admin** — VLOOKUP `agence -> code_agence`. Sortie : `telephone | code_agence | date`. Les lignes `NA` s'affichent avant le téléchargement.")
         st.markdown("##### Étape 1 : Liste agences MAMDA (2 colonnes : `agence` | `code_agence`)")
         ref_mamda = st.file_uploader(
-            "📁 Uploadi liste agences MAMDA",
+            "📁 Téléverser la liste des agences MAMDA",
             type=["xlsx", "xls", "csv"],
             accept_multiple_files=False,
             key="mamda_uploader_ref"
@@ -2466,7 +2466,7 @@ def app_traitement_agence():
                 st.error(f"❌ Fichier agences illisible : {e}")
                 return
         else:
-            st.info("Uploadi la liste `agence | code_agence` bach tkemel.")
+            st.info("Téléversez la liste `agence | code_agence` pour continuer.")
         st.markdown("##### Étape 2 : Fichier(s) traitement (doit contenir colonne `agence` + `telephone` + `date`)")
         fichiers_mamda = st.file_uploader(
             "📁 Glissez vos fichiers traitement ici",
@@ -2485,19 +2485,19 @@ def app_traitement_agence():
             _yp_m += 1
         mmyyyy_m = f"{_mp_m:02d}{_yp_m}"
         nom_custom_m = st.text_input(
-            "✏️ Smia dial fichier (ex: MAMDA)",
+            "✏️ Nom du fichier (ex : MAMDA)",
             placeholder="MAMDA",
             key="mamda_nom_fichier",
-            help="Ghadi tkhrj lik automatiquement : MAMDA_SMIA_MMYYYY.xlsx (MMYYYY = chhar jay)"
+            help="Nom généré automatiquement : MAMDA_SMIA_MMYYYY.xlsx (MMYYYY = mois prochain)"
         ).strip()
         nom_custom_m_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom_m).strip().replace(" ", "_").upper()[:50]
         if nom_custom_m_clean:
-            st.caption(f"Aperçu nom : **MAMDA_{nom_custom_m_clean}_{mmyyyy_m}.xlsx**")
-        msa7_na_m = st.checkbox(
-            "🧹 Msa7 les lignes li fihom NA (code_agence) 9bel download",
+            st.caption(f"Aperçu du nom : **MAMDA_{nom_custom_m_clean}_{mmyyyy_m}.xlsx**")
+        suppr_na_m = st.checkbox(
+            "🧹 Supprimer les lignes avec NA (code_agence) avant téléchargement",
             value=False,
-            key="mamda_msa7_na",
-            help="Kheliha me7loula bach tchouf NA lowla ou tzid agences na9sa, ou cocheha bach tmsa7hom"
+            key="mamda_suppr_na",
+            help="Laissez décoché pour voir d'abord les NA et ajouter les agences manquantes, ou cochez pour les supprimer"
         )
         fichiers_traites_m = []
         resultats_m = []
@@ -2523,23 +2523,23 @@ def app_traitement_agence():
                     base_m = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
                     base_m = re.sub(r'[\\/:*?"<>|]+', '_', base_m)[:50]
                     nom_sortie_m = f"MAMDA_{base_m}_{mmyyyy_m}.xlsx"
-                df_dl = df_m[df_m["code_agence"].astype(str).str.upper() != "NA"].reset_index(drop=True) if msa7_na_m else df_m
+                df_dl = df_m[df_m["code_agence"].astype(str).str.upper() != "NA"].reset_index(drop=True) if suppr_na_m else df_m
                 excel_m = to_excel_bytes_mamda(df_dl)
                 fichiers_traites_m.append((nom_sortie_m, excel_m))
                 resultats_m.append({"Source": fichier.name, "Lignes": len(df_m), "NA": nb_na, "Sortie": nom_sortie_m, "Statut": "✅ OK"})
                 if nb_na > 0:
                     _na_rows = df_m[df_m["code_agence"].astype(str).str.upper() == "NA"]
                     na_global.append((_fichier_nom := fichier.name, _na_rows))
-                    st.warning(f"⚠️ {fichier.name} : **{nb_na}** ligne(s) fiha NA (agence ma kaynach f liste) — chouf ta7t 9bel ma t-téléchargi")
+                    st.warning(f"⚠️ {fichier.name} : **{nb_na}** ligne(s) avec NA (agence absente de la liste) — voir ci-dessous avant de télécharger")
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_dl)} lignes)", expanded=False):
                     st.dataframe(df_dl.head(10), use_container_width=True, hide_index=True)
             except Exception as e:
                 resultats_m.append({"Source": fichier.name, "Lignes": 0, "NA": "-", "Sortie": "-", "Statut": f"❌ {e}"})
         if na_global:
             st.markdown("---")
-            st.subheader("🔍 Lignes NA — agences na9sa (zidhom f liste wla coche Msa7)")
+            st.subheader("🔍 Lignes NA — agences manquantes (ajoutez-les à la liste ou cochez Supprimer)")
             for _fn, _nr in na_global:
-                with st.expander(f"❌ NA f {_fn} ({len(_nr)} lignes)", expanded=True):
+                with st.expander(f"❌ NA dans {_fn} ({len(_nr)} lignes)", expanded=True):
                     st.dataframe(_nr, use_container_width=True, hide_index=True)
         st.markdown("---")
         st.subheader("📊 Résumé")
@@ -2579,10 +2579,10 @@ def app_traitement_agence():
                     )
         return
     if format_agence == "MAMDA API":
-        st.markdown("**MAMDA API** — VLOOKUP `agence -> code_agence`. Sortie : `agence | code_agence | nomClient | police | date | telephone`. Les lignes `NA` kaybanou 9bel download.")
+        st.markdown("**MAMDA API** — VLOOKUP `agence -> code_agence`. Sortie : `agence | code_agence | nomClient | police | date | telephone`. Les lignes `NA` s'affichent avant le téléchargement.")
         st.markdown("##### Étape 1 : Liste agences MAMDA (2 colonnes : `agence` | `code_agence`)")
         ref_api = st.file_uploader(
-            "📁 Uploadi liste agences MAMDA",
+            "📁 Téléverser la liste des agences MAMDA",
             type=["xlsx", "xls", "csv"],
             accept_multiple_files=False,
             key="mamda_api_uploader_ref"
@@ -2601,7 +2601,7 @@ def app_traitement_agence():
                 st.error(f"❌ Fichier agences illisible : {e}")
                 return
         else:
-            st.info("Uploadi la liste `agence | code_agence` bach tkemel.")
+            st.info("Téléversez la liste `agence | code_agence` pour continuer.")
         st.markdown("##### Étape 2 : Fichier(s) traitement (colonnes `agence` + `nomClient` + `police` + `date` + `telephone`)")
         fichiers_api = st.file_uploader(
             "📁 Glissez vos fichiers traitement ici",
@@ -2620,19 +2620,19 @@ def app_traitement_agence():
             _yp_a += 1
         mmyyyy_a = f"{_mp_a:02d}{_yp_a}"
         nom_custom_a = st.text_input(
-            "✏️ Smia dial fichier (ex: MAMDA_API)",
+            "✏️ Nom du fichier (ex : MAMDA_API)",
             placeholder="MAMDA_API",
             key="mamda_api_nom_fichier",
-            help="Ghadi tkhrj lik automatiquement : MAMDA_API_SMIA_MMYYYY.xlsx (MMYYYY = chhar jay)"
+            help="Nom généré automatiquement : MAMDA_API_SMIA_MMYYYY.xlsx (MMYYYY = mois prochain)"
         ).strip()
         nom_custom_a_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom_a).strip().replace(" ", "_").upper()[:50]
         if nom_custom_a_clean:
-            st.caption(f"Aperçu nom : **MAMDA_API_{nom_custom_a_clean}_{mmyyyy_a}.xlsx**")
-        msa7_na_a = st.checkbox(
-            "🧹 Msa7 les lignes li fihom NA (code_agence) 9bel download",
+            st.caption(f"Aperçu du nom : **MAMDA_API_{nom_custom_a_clean}_{mmyyyy_a}.xlsx**")
+        suppr_na_a = st.checkbox(
+            "🧹 Supprimer les lignes avec NA (code_agence) avant téléchargement",
             value=False,
-            key="mamda_api_msa7_na",
-            help="Kheliha me7loula bach tchouf NA lowla ou tzid agences na9sa, ou cocheha bach tmsa7hom"
+            key="mamda_api_suppr_na",
+            help="Laissez décoché pour voir d'abord les NA et ajouter les agences manquantes, ou cochez pour les supprimer"
         )
         fichiers_traites_a = []
         resultats_a = []
@@ -2657,23 +2657,23 @@ def app_traitement_agence():
                     base_a = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
                     base_a = re.sub(r'[\\/:*?"<>|]+', '_', base_a)[:50]
                     nom_sortie_a = f"MAMDA_API_{base_a}_{mmyyyy_a}.xlsx"
-                df_dl_a = df_a[df_a["code_agence"].astype(str).str.upper() != "NA"].reset_index(drop=True) if msa7_na_a else df_a
+                df_dl_a = df_a[df_a["code_agence"].astype(str).str.upper() != "NA"].reset_index(drop=True) if suppr_na_a else df_a
                 excel_a = to_excel_bytes_mamda_api(df_dl_a)
                 fichiers_traites_a.append((nom_sortie_a, excel_a))
                 resultats_a.append({"Source": fichier.name, "Lignes": len(df_a), "NA": nb_na_a, "Sortie": nom_sortie_a, "Statut": "✅ OK"})
                 if nb_na_a > 0:
                     _na_a = df_a[df_a["code_agence"].astype(str).str.upper() == "NA"]
                     na_global_a.append((fichier.name, _na_a))
-                    st.warning(f"⚠️ {fichier.name} : **{nb_na_a}** ligne(s) fiha NA (agence ma kaynach f liste) — chouf ta7t 9bel ma t-téléchargi")
+                    st.warning(f"⚠️ {fichier.name} : **{nb_na_a}** ligne(s) avec NA (agence absente de la liste) — voir ci-dessous avant de télécharger")
                 with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_dl_a)} lignes)", expanded=False):
                     st.dataframe(df_dl_a.head(10), use_container_width=True, hide_index=True)
             except Exception as e:
                 resultats_a.append({"Source": fichier.name, "Lignes": 0, "NA": "-", "Sortie": "-", "Statut": f"❌ {e}"})
         if na_global_a:
             st.markdown("---")
-            st.subheader("🔍 Lignes NA — agences na9sa (zidhom f liste wla coche Msa7)")
+            st.subheader("🔍 Lignes NA — agences manquantes (ajoutez-les à la liste ou cochez Supprimer)")
             for _fn_a, _nr_a in na_global_a:
-                with st.expander(f"❌ NA f {_fn_a} ({len(_nr_a)} lignes)", expanded=True):
+                with st.expander(f"❌ NA dans {_fn_a} ({len(_nr_a)} lignes)", expanded=True):
                     st.dataframe(_nr_a, use_container_width=True, hide_index=True)
         st.markdown("---")
         st.subheader("📊 Résumé")
@@ -2838,8 +2838,8 @@ def app_traitement_agence():
                             except:
                                 pass
                     st.markdown("---")
-        # === N° Police : garder si m9ada, régénérer si scientifique/vide, ou TOUT si double code ancien+nouveau ===
-        st.markdown("### 🔢 N° Police — conservation si m9ada, génération si scientifique / double code")
+        # === N° Police : conserver si déjà correct, régénérer si scientifique/vide, ou TOUT si double code ancien+nouveau ===
+        st.markdown("### 🔢 N° Police — conservation si déjà correct, génération si scientifique / double code")
         st.caption(f"Si N° Police déjà correct → conservé. Si scientifique (5,86E+14) / vide → régénéré. Si 2 codes agence (ancien+nouveau) → nouveau code + régénération totale dès 00001.")
         mois_courant = datetime.now().strftime('%m')
         annee_courante = datetime.now().strftime('%Y')
@@ -2936,7 +2936,7 @@ def app_traitement_agence():
                         st.code(" → ".join(_prevA) + (f" … +{len(f['df'])-2} autres (total {len(f['df'])})" if len(f['df'])>2 else ""), language=None)
                         st.caption(f"Tout sera régénéré depuis {_auto_nouveau} (ancien effacé). Intermediaire et reste inchangés.")
                     else:
-                        st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok_auto} déjà m9ada / 🔄 {_nb_invalid_auto} à générer")
+                        st.markdown(f"**📄 {f['nom_fichier']}** — *{f.get('nom_agence') or 'Agence non définie'}* — ✅ {_nb_ok_auto} déjà corrects / 🔄 {_nb_invalid_auto} à générer")
                         f['nb_a_regenerer'] = _nb_invalid_auto
                         f['nb_deja_ok'] = _nb_ok_auto
                         f['force_regenerer'] = False

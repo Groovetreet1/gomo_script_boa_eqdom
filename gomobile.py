@@ -2185,7 +2185,7 @@ def est_police_scientifique_ou_vide(val):
 def app_traitement_agence():
     format_agence = st.radio(
         "Format de sortie :",
-        ("RMA", "CAT ASSURANCE", "MAMDA"),
+        ("RMA", "CAT ASSURANCE", "MAMDA Assurance Admin"),
         horizontal=True,
         key="agence_format_choice",
         help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone. MAMDA = VLOOKUP agence -> code_agence (telephone / code_agence / date)."
@@ -2284,8 +2284,8 @@ def app_traitement_agence():
                         key=f"cat_dl_{i}"
                     )
         return
-    if format_agence == "MAMDA":
-        st.markdown("**MAMDA** — VLOOKUP `agence -> code_agence`. Sortie : `telephone | code_agence | date`. Les lignes `NA` kaybanou 9bel download.")
+    if format_agence == "MAMDA Assurance Admin":
+        st.markdown("**MAMDA Assurance Admin** — VLOOKUP `agence -> code_agence`. Sortie : `telephone | code_agence | date`. Les lignes `NA` kaybanou 9bel download.")
         st.markdown("##### Étape 1 : Liste agences MAMDA (2 colonnes : `agence` | `code_agence`)")
         ref_mamda = st.file_uploader(
             "📁 Uploadi liste agences MAMDA",
@@ -3947,7 +3947,7 @@ if app_choice == "EQDOM_MARKETING":
     app_hero("EQDOM · Marketing", "Normalisation & déduplication de fichiers Excel marketing")
     app_eqdom_marketing()
 elif app_choice == "TRAITEMENT_AGENCE":
-    app_hero("Traitement Fichiers Agence", "RMA · CAT ASSURANCE · MAMDA — Détection auto & mise en forme")
+    app_hero("Traitement Fichiers Agence", "RMA · CAT ASSURANCE · MAMDA Assurance Admin — Détection auto & mise en forme")
     app_traitement_agence()
 elif app_choice == "BOA_MARKETING":
     app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")

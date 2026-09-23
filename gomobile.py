@@ -1562,21 +1562,32 @@ def trouver_colonne_cat(df, kind):
         return None
     if kind == "nom":
         keys = ["nom", "nom_client", "nom client", "raison sociale", "nomraison sociale",
-                "client", "nomraisonsociale", "nomrs", "name", "full name", "fullname"]
+                "client", "nomraisonsociale", "nomrs", "name", "full name", "fullname",
+                "proprietaire", "assure", "souscripteur", "beneficiaire", "conducteur",
+                "prenom_nom", "prenom nom", "nom_prenom", "nom prenom"]
         for c, n in cols_norm.items():
             if n in keys:
                 return c
         for c, n in cols_norm.items():
-            if "nom" in n or "client" in n or "raison" in n or "name" in n:
+            if ("nom" in n or "client" in n or "raison" in n or "name" in n
+                    or "proprietaire" in n or "assure" in n or "souscripteur" in n
+                    or "beneficiaire" in n or "conducteur" in n or "prenom" in n):
                 return c
         return None
     if kind == "echeance":
-        keys = ["date_echeance", "date echeance", "echeance", "datecheance"]
+        keys = ["date_echeance", "date echeance", "echeance", "datecheance",
+                "prochain effet", "prochainecheance", "prochain_effet", "prochaineffet"]
         for c, n in cols_norm.items():
             if n in keys:
                 return c
         for c, n in cols_norm.items():
             if "echeance" in n:
+                return c
+        # Variantes connues : "Prochain Effet" = echeance chez CAT (ex: Termes 10.xls)
+        for c, n in cols_norm.items():
+            if "prochain" in n and "effet" in n:
+                return c
+            if n in ("effet", "prochain", "date effet", "date_effet", "dateeffet"):
                 return c
         return None
     if kind == "telephone":
@@ -1589,6 +1600,175 @@ def trouver_colonne_cat(df, kind):
                 return c
         return None
     return None
+
+
+def _taux_dates_cat(serie, format_date='FR', echantillon=30):
+    """Proportion de valeurs convertibles en dates (0..1). Utilise convertir_date_agence."""
+    try:
+        vals = [v for v in serie.dropna().tolist()
+                if str(v).strip() not in ("", "nan", "None", "NaT", "NAT", "NA")]
+        vals = vals[:echantillon]
+        if not vals:
+            return 0.0
+        ok = 0
+        for v in vals:
+            try:
+                d = convertir_date_agence(v, format_date)
+            except:
+                d = None
+            if d is not None and pd.notna(d):
+                ok += 1
+                continue
+            # Re-essayer avec l'autre format (FR<->US) pour headers inconnus
+            try:
+                alt = 'US' if format_date == 'FR' else 'FR'
+                d2 = convertir_date_agence(v, alt)
+                if d2 is not None and pd.notna(d2):
+                    ok += 1
+            except:
+                pass
+        return ok / len(vals)
+    except:
+        return 0.0
+
+
+def _est_valeur_nom_cat(val):
+    """True si une valeur ressemble a un nom de personne/raison sociale."""
+    if pd.isna(val):
+        return False
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "nat", "na"):
+        return False
+    # Police typique : C2025/004482, 3051995/508422 -> slash + chiffres = pas un nom
+    if "/" in s and re.search(r"\d{3,}", s):
+        return False
+    # Telephone : que des chiffres (+separateurs) avec 9+ digits = pas un nom
+    digits = re.sub(r"\D", "", s)
+    lettres = re.findall(r"[A-Za-zÀ-ÿ]", s)
+    if len(digits) >= 9 and len(lettres) <= 2:
+        return False
+    # Date ISO : 2026-10-01... -> pas un nom (convertible en date)
+    try:
+        if convertir_date_agence(s, 'FR') is not None or convertir_date_agence(s, 'US') is not None:
+            # Attention : une annee seule "2026" parse parfois -> exiger separateur de date
+            if re.search(r"[/\-.]\s*\d{1,4}([/\-.]\s*\d{1,4})?", s) or re.match(r"^\d{4}-\d{2}-\d{2}", s):
+                return False
+    except:
+        pass
+    # Nom : au moins 3 lettres, longueur >= 3
+    if len(lettres) >= 3 and len(s) >= 3:
+        return True
+    return False
+
+
+def _taux_noms_cat(serie, echantillon=50):
+    """Proportion de valeurs qui ressemblent a des noms (0..1)."""
+    try:
+        vals = [v for v in serie.dropna().tolist()
+                if str(v).strip() not in ("", "nan", "None", "NaT", "NAT")]
+        vals = vals[:echantillon]
+        if not vals:
+            return 0.0
+        # Ignorer les vides/NA pour le denominateur
+        utiles = [v for v in vals if str(v).strip() not in ("", "NA", "na")]
+        if not utiles:
+            return 0.0
+        ok = sum(1 for v in utiles if _est_valeur_nom_cat(v))
+        return ok / len(utiles)
+    except:
+        return 0.0
+
+
+def trouver_colonne_cat_auto(df, kind, exclure=None, format_date='FR', seuil_date=0.5, seuil_nom=0.4):
+    """Detection smart : header d'abord, puis contenu.
+    - echeance : si header absent OU colonne header ne contient pas de dates -> scan colonnes qui contiennent des dates.
+    - nom : si header absent OU colonne header ne contient pas de noms -> scan colonnes qui contiennent des noms.
+    exclure : colonnes deja utilisees (police/tel/...) a ne pas reprendre.
+    """
+    exclure = set(exclure or [])
+    # 1) Header classique
+    col_header = trouver_colonne_cat(df, kind)
+    if col_header is not None and col_header not in exclure:
+        if kind == "echeance":
+            # Valider que ca contient vraiment des dates, sinon fallback contenu
+            try:
+                if _taux_dates_cat(df[col_header], format_date) >= 0.3:
+                    return col_header
+            except:
+                return col_header
+            # Header suspect -> on continue vers scan contenu (sans l'exclure definitivement)
+        elif kind == "nom":
+            try:
+                if _taux_noms_cat(df[col_header]) >= 0.3:
+                    return col_header
+            except:
+                return col_header
+        else:
+            return col_header
+    # 2) Fallback par contenu
+    if kind == "echeance":
+        # Priorite aux colonnes dont le header evoque une date (date/effet/prochain/expiration/fin)
+        cols_norm = {}
+        for c in df.columns:
+            try:
+                cols_norm[c] = nettoyer_colonne_agence(c)
+            except:
+                cols_norm[c] = str(c).strip().lower()
+        candidats_date_hint = [c for c, n in cols_norm.items()
+                               if c not in exclure and any(k in n for k in
+                               ["date", "effet", "prochain", "expiration", "expir", "fin", "terme", "echeance"])]
+        best, best_taux = None, 0.0
+        for c in candidats_date_hint:
+            try:
+                t = _taux_dates_cat(df[c], format_date)
+            except:
+                continue
+            if t > best_taux:
+                best, best_taux = c, t
+        if best is not None and best_taux >= seuil_date:
+            return best
+        # Sinon scan global : toute colonne avec des dates (hors exclues)
+        best, best_taux = None, 0.0
+        for c in df.columns:
+            if c in exclure or c == col_header:
+                continue
+            # Ne pas prendre telephone/police deja identifies comme hint
+            try:
+                t = _taux_dates_cat(df[c], format_date)
+            except:
+                continue
+            if t > best_taux:
+                best, best_taux = c, t
+        if best is not None and best_taux >= seuil_date:
+            return best
+        # Si header existait mais pauvre en dates, le garder quand meme plutot que None
+        if col_header is not None and col_header not in exclure:
+            return col_header
+        return None
+    if kind == "nom":
+        best, best_taux = None, 0.0
+        for c in df.columns:
+            if c in exclure or c == col_header:
+                continue
+            try:
+                t = _taux_noms_cat(df[c])
+            except:
+                continue
+            # Bonus si header evoque un nom (sans etre dans les cles exactes)
+            try:
+                n = nettoyer_colonne_agence(c)
+            except:
+                n = str(c).lower()
+            bonus = 0.05 if any(k in n for k in ["prop", "assur", "souscr", "benef", "conduct", "titulaire", "client"]) else 0.0
+            t += bonus
+            if t > best_taux:
+                best, best_taux = c, t
+        if best is not None and best_taux >= seuil_nom:
+            return best
+        if col_header is not None and col_header not in exclure:
+            return col_header
+        return None
+    return col_header
 
 
 def formater_telephone_api(valeur):
@@ -1631,11 +1811,16 @@ def formater_telephone_cat(valeur):
 
 
 def traiter_fichier_cat_assurance(df, format_date='FR'):
-    """Sortie CAT : 4 colonnes police/nom/echeance/telephone dans cet ordre."""
+    """Sortie CAT : 4 colonnes police/nom/echeance/telephone dans cet ordre.
+    Detection robuste : header d'abord, puis contenu (dates -> echeance, noms -> nom)."""
     col_pol = trouver_colonne_cat(df, "police")
-    col_nom = trouver_colonne_cat(df, "nom")
-    col_ech = trouver_colonne_cat(df, "echeance")
     col_tel = trouver_colonne_cat(df, "telephone")
+    _excl_base = {c for c in [col_pol, col_tel] if c is not None}
+    col_ech = trouver_colonne_cat_auto(df, "echeance", exclure=_excl_base, format_date=format_date)
+    _excl_nom = set(_excl_base)
+    if col_ech is not None:
+        _excl_nom.add(col_ech)
+    col_nom = trouver_colonne_cat_auto(df, "nom", exclure=_excl_nom, format_date=format_date)
     out = pd.DataFrame()
     # police : garder tel quel en string (pas de conversion numerique -> evite E+)
     if col_pol is not None:
@@ -2674,8 +2859,11 @@ def app_traitement_agence():
         for idx_cat, fichier in enumerate(fichiers_cat):
             try:
                 df_raw = lire_fichier_agence(fichier)
-                # detecter format date via colonne echeance si possible
-                col_ech_raw = trouver_colonne_cat(df_raw, "echeance")
+                # detecter format date via colonne echeance (auto : header OU contenu dates)
+                try:
+                    col_ech_raw = trouver_colonne_cat_auto(df_raw, "echeance", format_date='FR')
+                except:
+                    col_ech_raw = trouver_colonne_cat(df_raw, "echeance")
                 fmt = detecter_format_date_agence(df_raw, col_ech_raw) if col_ech_raw is not None else 'FR'
                 df_cat = traiter_fichier_cat_assurance(df_raw, fmt)
                 nb_suppr = len(df_raw) - len(df_cat)

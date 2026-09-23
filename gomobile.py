@@ -1985,7 +1985,7 @@ def formater_echeance_saham_ddmm(valeur, format_date='FR'):
 
 def traiter_fichier_saham_api(df, format_date='FR'):
     """SAHAM API : garde toutes les colonnes d'origine.
-    - echeance detectee (header OU contenu dates) -> texte DD-MM
+    - echeance detectee (header OU contenu dates) -> texte DD-MM + entete renommee 'date'
     - Tel_Portable detecte -> normalise Maroc 0XXXXXXXXX + entete renommee 'telephone'
     - autres colonnes inchangees."""
     df = df.copy()
@@ -1993,15 +1993,20 @@ def traiter_fichier_saham_api(df, format_date='FR'):
     col_ech = trouver_colonne_saham(df, "echeance", format_date=format_date)
     _excl = {col_ech} if col_ech is not None else set()
     col_tel = trouver_colonne_saham(df, "telephone", exclure=_excl, format_date=format_date)
-    # Echeance -> DD-MM
+    # Echeance -> DD-MM + entete 'date'
     if col_ech is not None:
         df[col_ech] = df[col_ech].apply(lambda x: formater_echeance_saham_ddmm(x, format_date))
+        if col_ech != "date":
+            if "date" in df.columns:
+                df = df.drop(columns=["date"])
+            df = df.rename(columns={col_ech: "date"})
     # Telephone -> Maroc avec 0
     if col_tel is not None:
         df[col_tel] = df[col_tel].apply(formater_telephone_cat)
         if col_tel != "telephone":
             df = df.rename(columns={col_tel: "telephone"})
     return df, {"col_echeance": str(col_ech) if col_ech is not None else None,
+                "col_date": "date" if col_ech is not None else None,
                 "col_telephone": "telephone" if col_tel is not None else None,
                 "col_telephone_src": str(col_tel) if col_tel is not None else None}
 
@@ -2045,7 +2050,7 @@ def to_excel_bytes_saham(df):
         ln = str(col_name).lower()
         if "telephone" in ln or "tel" in ln or "portable" in ln or "gsm" in ln:
             w = 16
-        elif "echeance" in ln or "echeance" in ln:
+        elif "echeance" in ln or "echeance" in ln or ln == "date":
             w = 12
         elif "police" in ln:
             w = 18
@@ -3075,7 +3080,7 @@ def app_traitement_agence():
                     )
         return
     if format_agence == "SAHAM API":
-        st.markdown("Téléversez vos fichiers — sortie **SAHAM API** : toutes les colonnes gardées, `Echéance` -> **DD-MM** (ex: 04/08/2026 -> 04-08), `Tel_Portable` -> **telephone** Maroc avec 0.")
+        st.markdown("Téléversez vos fichiers — sortie **SAHAM API** : toutes les colonnes gardées, `Echéance` -> **date** DD-MM (ex: 04/08/2026 -> 04-08), `Tel_Portable` -> **telephone** Maroc avec 0.")
         fichiers_saham = st.file_uploader(
             "📁 Glissez vos fichiers SAHAM ici",
             type=["xlsx", "xls", "csv"],

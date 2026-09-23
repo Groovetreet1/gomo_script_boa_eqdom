@@ -1916,6 +1916,158 @@ def to_excel_bytes_cat(df):
 
 
 # ==============================
+# SAHAM API — garde toutes les colonnes, echeance -> DD-MM, Tel_Portable -> telephone (Maroc 0XXXXXXXXX)
+# ==============================
+
+def trouver_colonne_saham(df, kind, exclure=None, format_date='FR'):
+    """Detection colonnes SAHAM : echeance (header OU contenu dates) / telephone (header OU contenu tel)."""
+    exclure = set(exclure or [])
+    if kind == "echeance":
+        return trouver_colonne_cat_auto(df, "echeance", exclure=exclure, format_date=format_date)
+    if kind == "telephone":
+        # Header d'abord (Tel_Portable, Tel Portable, GSM, etc.)
+        col = trouver_colonne_cat(df, "telephone")
+        if col is not None and col not in exclure:
+            return col
+        # Fallback header specifique SAHAM
+        cols_norm = {}
+        for c in df.columns:
+            try:
+                cols_norm[c] = nettoyer_colonne_agence(c)
+            except:
+                cols_norm[c] = str(c).strip().lower()
+        for c, n in cols_norm.items():
+            if c in exclure:
+                continue
+            if "portable" in n or "portab" in n or "telportable" in n or "tel_portable" in n:
+                return c
+        # Fallback contenu : colonne avec beaucoup de numeros >=9 chiffres
+        best, best_n = None, 0
+        for c in df.columns:
+            if c in exclure:
+                continue
+            try:
+                n = sum(1 for v in df[c].dropna().tolist()[:50]
+                        if len(re.sub(r"\D", "", str(v))) >= 9)
+            except:
+                continue
+            if n > best_n:
+                best, best_n = c, n
+        if best is not None and best_n > 0:
+            return best
+        return col
+    return None
+
+
+def formater_echeance_saham_ddmm(valeur, format_date='FR'):
+    """Parse date puis format DD-MM (ex: 04/08/2026 -> 04-08). Non parseable -> valeur nettoyee d'origine."""
+    if pd.isna(valeur):
+        return ""
+    s = str(valeur).strip()
+    if not s or s.lower() in ("nan", "none", "nat", "na"):
+        return ""
+    try:
+        d = convertir_date_agence(valeur, format_date)
+        if d is None or pd.isna(d):
+            alt = 'US' if format_date == 'FR' else 'FR'
+            d = convertir_date_agence(valeur, alt)
+        if d is not None and pd.notna(d):
+            try:
+                if isinstance(d, pd.Timestamp):
+                    d = d.to_pydatetime()
+            except:
+                pass
+            return f"{d.day:02d}-{d.month:02d}"
+    except:
+        pass
+    return s
+
+
+def traiter_fichier_saham_api(df, format_date='FR'):
+    """SAHAM API : garde toutes les colonnes d'origine.
+    - echeance detectee (header OU contenu dates) -> texte DD-MM
+    - Tel_Portable detecte -> normalise Maroc 0XXXXXXXXX + entete renommee 'telephone'
+    - autres colonnes inchangees."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    col_ech = trouver_colonne_saham(df, "echeance", format_date=format_date)
+    _excl = {col_ech} if col_ech is not None else set()
+    col_tel = trouver_colonne_saham(df, "telephone", exclure=_excl, format_date=format_date)
+    # Echeance -> DD-MM
+    if col_ech is not None:
+        df[col_ech] = df[col_ech].apply(lambda x: formater_echeance_saham_ddmm(x, format_date))
+    # Telephone -> Maroc avec 0
+    if col_tel is not None:
+        df[col_tel] = df[col_tel].apply(formater_telephone_cat)
+        if col_tel != "telephone":
+            df = df.rename(columns={col_tel: "telephone"})
+    return df, {"col_echeance": str(col_ech) if col_ech is not None else None,
+                "col_telephone": "telephone" if col_tel is not None else None,
+                "col_telephone_src": str(col_tel) if col_tel is not None else None}
+
+
+def to_excel_bytes_saham(df):
+    """Export SAHAM : tout en texte (@) pour garder DD-MM (04-08) et telephone 0XXXXXXXXX."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Donnees"
+    ws.sheet_view.showGridLines = False
+    bordure = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    cell_alignment = Alignment(vertical='center')
+    nb_colonnes = len(df.columns)
+    nb_lignes = len(df) + 1
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = bordure
+        cell.alignment = header_alignment
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, (col_name, value) in enumerate(zip(df.columns, row), 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if pd.isna(value) or (isinstance(value, str) and value.strip() == ""):
+                cell.value = None
+            else:
+                cell.value = _clean_excel_str(value)
+            cell.number_format = '@'
+            cell.border = bordure
+            cell.alignment = cell_alignment
+    for col_idx, col_name in enumerate(df.columns, 1):
+        col_letter = get_column_letter(col_idx)
+        ln = str(col_name).lower()
+        if "telephone" in ln or "tel" in ln or "portable" in ln or "gsm" in ln:
+            w = 16
+        elif "echeance" in ln or "echeance" in ln:
+            w = 12
+        elif "police" in ln:
+            w = 18
+        elif "nom" in ln or "prenom" in ln:
+            w = 18
+        elif "adresse" in ln or "complement" in ln:
+            w = 30
+        elif "immatricul" in ln:
+            w = 14
+        else:
+            w = 15
+        ws.column_dimensions[col_letter].width = w
+    ws.freeze_panes = 'A2'
+    derniere_colonne = get_column_letter(nb_colonnes)
+    ws.print_area = f'A1:{derniere_colonne}{nb_lignes}'
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+# ==============================
 # MAMDA — VLOOKUP agence -> code_agence
 # sortie : telephone | code_agence | date
 # ==============================
@@ -2820,10 +2972,10 @@ def est_police_scientifique_ou_vide(val):
 def app_traitement_agence():
     format_agence = st.radio(
         "Format de sortie :",
-        ("RMA", "CAT ASSURANCE", "MAMDA Assurance Admin", "MAMDA API"),
+        ("RMA", "CAT ASSURANCE", "SAHAM API", "MAMDA Assurance Admin", "MAMDA API"),
         horizontal=True,
         key="agence_format_choice",
-        help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone. MAMDA Assurance Admin = VLOOKUP telephone / code_agence / date. MAMDA API = VLOOKUP agence / code_agence / nomClient / police / date / telephone."
+        help="RMA = mise en forme complète (15 colonnes). CAT ASSURANCE = sortie simple police / nom / echeance / telephone. SAHAM API = garde toutes les colonnes, echeance -> DD-MM, Tel_Portable -> telephone Maroc. MAMDA Assurance Admin = VLOOKUP telephone / code_agence / date. MAMDA API = VLOOKUP agence / code_agence / nomClient / police / date / telephone."
     )
     if format_agence == "CAT ASSURANCE":
         st.markdown("Téléversez vos fichiers — sortie **CAT ASSURANCE** : `police | nom | echeance | telephone` (police en texte, echeance en date, telephone Maroc avec 0).")
@@ -2920,6 +3072,103 @@ def app_traitement_agence():
                         file_name=nom,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"cat_dl_{i}"
+                    )
+        return
+    if format_agence == "SAHAM API":
+        st.markdown("Téléversez vos fichiers — sortie **SAHAM API** : toutes les colonnes gardées, `Echéance` -> **DD-MM** (ex: 04/08/2026 -> 04-08), `Tel_Portable` -> **telephone** Maroc avec 0.")
+        fichiers_saham = st.file_uploader(
+            "📁 Glissez vos fichiers SAHAM ici",
+            type=["xlsx", "xls", "csv"],
+            accept_multiple_files=True,
+            key="agence_uploader_saham"
+        )
+        if not fichiers_saham:
+            return
+        # MMYYYY = mois prochain (ex: on est en 09 -> 102026)
+        _now_s = datetime.now()
+        _mp_s = _now_s.month + 1
+        _yp_s = _now_s.year
+        if _mp_s > 12:
+            _mp_s = 1
+            _yp_s += 1
+        mmyyyy_s = f"{_mp_s:02d}{_yp_s}"
+        nom_custom_s = st.text_input(
+            "✏️ Nom du fichier (ex : SAHAM)",
+            placeholder="SAHAM",
+            key="saham_nom_fichier",
+            help="Nom généré automatiquement : SAHAM_API_NOM_MMYYYY.xlsx (MMYYYY = mois prochain)"
+        ).strip()
+        nom_custom_s_clean = re.sub(r'[\\/:*?"<>|]+', '_', nom_custom_s).strip().replace(" ", "_").upper()[:50]
+        if nom_custom_s_clean:
+            st.caption(f"Aperçu du nom : **SAHAM_API_{nom_custom_s_clean}_{mmyyyy_s}.xlsx**")
+        else:
+            st.caption(f"MMYYYY (mois prochain) : **{mmyyyy_s}** — saisissez un nom ci-dessus pour obtenir SAHAM_API_NOM_{mmyyyy_s}.xlsx")
+        fichiers_traites_s = []
+        resultats_s = []
+        for idx_s, fichier in enumerate(fichiers_saham):
+            try:
+                df_raw_s = lire_fichier_agence(fichier)
+                try:
+                    col_ech_s = trouver_colonne_saham(df_raw_s, "echeance", format_date='FR')
+                except:
+                    col_ech_s = None
+                fmt_s = detecter_format_date_agence(df_raw_s, col_ech_s) if col_ech_s is not None else 'FR'
+                df_s, info_s = traiter_fichier_saham_api(df_raw_s, fmt_s)
+                if nom_custom_s_clean:
+                    if len(fichiers_saham) == 1:
+                        nom_sortie_s = f"SAHAM_API_{nom_custom_s_clean}_{mmyyyy_s}.xlsx"
+                    else:
+                        nom_sortie_s = f"SAHAM_API_{nom_custom_s_clean}_{idx_s + 1}_{mmyyyy_s}.xlsx"
+                else:
+                    base_s = re.sub(r'\.(xlsx|xls|csv)$', '', fichier.name, flags=re.IGNORECASE).strip() or "FICHIER"
+                    base_s = re.sub(r'[\\/:*?"<>|]+', '_', base_s)[:50]
+                    nom_sortie_s = f"SAHAM_API_{base_s}_{mmyyyy_s}.xlsx"
+                excel_s = to_excel_bytes_saham(df_s)
+                fichiers_traites_s.append((nom_sortie_s, excel_s))
+                resultats_s.append({"Source": fichier.name, "Lignes": len(df_s),
+                                    "Echeance détectée": info_s.get("col_echeance") or "-",
+                                    "Tel détecté": info_s.get("col_telephone_src") or "-",
+                                    "Sortie": nom_sortie_s, "Statut": "✅ OK"})
+                with st.expander(f"👀 Aperçu — {fichier.name} ({len(df_s)} lignes)", expanded=False):
+                    st.dataframe(df_s.head(10), use_container_width=True, hide_index=True)
+            except Exception as e:
+                resultats_s.append({"Source": fichier.name, "Lignes": 0, "Echeance détectée": "-",
+                                    "Tel détecté": "-", "Sortie": "-", "Statut": f"❌ {e}"})
+        st.markdown("---")
+        st.subheader("📊 Résumé")
+        st.dataframe(pd.DataFrame(resultats_s), use_container_width=True, hide_index=True)
+        if fichiers_traites_s:
+            st.markdown("---")
+            st.subheader("💾 Téléchargement")
+            if len(fichiers_traites_s) == 1:
+                nom, data = fichiers_traites_s[0]
+                st.download_button(
+                    f"📥 Télécharger {nom}",
+                    data=data,
+                    file_name=nom,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="saham_dl_single"
+                )
+            else:
+                zip_s = f"SAHAM_API_{nom_custom_s_clean}_{mmyyyy_s}.zip" if nom_custom_s_clean else f"SAHAM_API_BATCH_{mmyyyy_s}.zip"
+                st.download_button(
+                    f"📦 Télécharger ZIP ({len(fichiers_traites_s)} fichiers)",
+                    data=creer_zip_agence(fichiers_traites_s),
+                    file_name=zip_s,
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="saham_dl_zip"
+                )
+                for i, (nom, data) in enumerate(fichiers_traites_s):
+                    st.download_button(
+                        f"📥 {nom}",
+                        data=data,
+                        file_name=nom,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"saham_dl_{i}"
                     )
         return
     if format_agence == "MAMDA Assurance Admin":

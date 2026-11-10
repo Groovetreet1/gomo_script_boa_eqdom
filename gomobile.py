@@ -5562,6 +5562,15 @@ def app_gomobile_api_campaigns():
             value=True,
             key="gomo_skip_past",
         )
+        shift_past_retries = st.checkbox(
+            "Décaler les relances ratées (garder 3 tentatives)",
+            value=True,
+            key="gomo_shift_past",
+            help=(
+                "Si T2 ou T3 est déjà passé, l'heure est décalée après l'heure "
+                "courante pour conserver 3 tentatives sur la journée."
+            ),
+        )
         allow_duplicate = st.checkbox(
             "Autoriser un doublon de campagne",
             value=False,
@@ -5597,6 +5606,7 @@ def app_gomobile_api_campaigns():
         second_time,
         third_time,
         skip_past=skip_past,
+        shift_past_retries=shift_past_retries,
     )
     now_local = datetime.now(GOMOBILE_TIMEZONE)
 
@@ -5624,14 +5634,20 @@ def app_gomobile_api_campaigns():
 
     if start_at <= now_local:
         st.info(
-            "T1 est déjà passée : la campagne démarrera immédiatement à l'activation. "
-            "Les relances passées sont ignorées si l'option est cochée."
+            "T1 est déjà passée : la campagne démarrera immédiatement à l'activation."
         )
     if len(retry_times) < 2:
-        st.warning(
-            "Une ou plusieurs relances sont déjà passées. Il y aura donc moins de "
-            "3 tentatives aujourd'hui."
-        )
+        if shift_past_retries:
+            st.warning(
+                "Moins de 3 tentatives aujourd'hui : il est trop tard dans la "
+                "journée pour décaler les relances restantes avant la fin de "
+                "la campagne."
+            )
+        else:
+            st.warning(
+                "Une ou plusieurs relances sont déjà passées. Il y aura donc moins de "
+                "3 tentatives aujourd'hui."
+            )
     if not skip_past and any(retry <= now_local for retry in retry_times):
         st.warning(
             "Les relances passées peuvent être refusées par l'API. "

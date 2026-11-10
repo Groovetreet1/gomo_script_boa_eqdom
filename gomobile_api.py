@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import time
 import unicodedata
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime, time as dt_time, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -355,11 +355,18 @@ def build_schedule(
     third_time: Optional[dt_time],
     now: Optional[datetime] = None,
     skip_past: bool = True,
+    shift_past_retries: bool = False,
+    retry_spacing_minutes: int = 30,
 ) -> tuple[datetime, datetime, list[datetime]]:
     """Construit startAt, stopAt et les heures de relance (tentatives 2 et 3).
 
     GoMobile attend dans `scheduledTimes` uniquement les tentatives 2..N ;
     la tentative 1 est le lancement de la campagne (`startAt`).
+
+    - `skip_past=True` : une relance déjà passée est simplement ignorée.
+    - `shift_past_retries=True` : une relance déjà passée est décalée juste
+      après l'heure courante afin de conserver le nombre de tentatives
+      demandé sur la journée.
     """
     timezone = GOMOBILE_TIMEZONE
     if isinstance(processing_date, datetime):
@@ -372,17 +379,34 @@ def build_schedule(
     stop_at = datetime.combine(processing_date, dt_time(23, 59, 59), tzinfo=timezone)
 
     retries: list[datetime] = []
+    spacing = timedelta(minutes=max(int(retry_spacing_minutes), 1))
     for candidate in (second_time, third_time):
         if candidate is None:
             continue
         retry_at = datetime.combine(processing_date, candidate, tzinfo=timezone)
         if retry_at <= start_at:
             continue
-        if skip_past and retry_at <= now:
-            continue
+        if retry_at <= now:
+            if shift_past_retries:
+                # Relance ratée : on la décale juste après l'heure courante
+                # pour conserver le nombre de tentatives demandé.
+                retry_at = now + spacing * (len(retries) + 1)
+            elif skip_past:
+                continue
+            # Sinon (skip_past=False) on conserve l'heure d'origine :
+            # l'API peut la refuser, c'est l'utilisateur qui l'a demandé.
         retries.append(retry_at)
 
-    return start_at, stop_at, retries
+    # GoMobile exige des horodatages strictement croissants.
+    ordered: list[datetime] = []
+    for value in retries:
+        if ordered and value <= ordered[-1]:
+            value = ordered[-1] + spacing
+        if value > stop_at:
+            break
+        ordered.append(value)
+
+    return start_at, stop_at, ordered
 
 
 def iso_datetime(value: datetime) -> str:

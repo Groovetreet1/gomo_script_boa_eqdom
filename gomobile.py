@@ -15,6 +15,7 @@ from openpyxl.styles import Border, Side, Font, Alignment, PatternFill
 import os
 import json
 import math
+from typing import Optional
 
 from gomobile_api import (
     CANONICAL_LIST_NAMES,

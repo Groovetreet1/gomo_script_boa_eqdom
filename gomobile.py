@@ -6264,6 +6264,10 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
+# Version affichée (utile pour vérifier quel build est en ligne)
+APP_BUILD = os.environ.get("APP_BUILD", "").strip() or "dev-local"
+st.sidebar.caption(f"Build : `{APP_BUILD}`")
+
 app_choice = st.sidebar.radio(
     "Choisir l'application :",
     (

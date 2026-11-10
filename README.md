@@ -35,16 +35,21 @@ L'application est prête pour **Render** (Blueprint). Deux options :
 
 ### Option B — Deploy Web Service (manuel)
 
-1. **New → Web Service** → connecter le repo GitHub.
-2. **Build Command**:
+1. **New → Web Service** → connecter le repo GitHub (branche `main`).
+2. **Build Command** :
    ```
    pip install -r requirements.txt
    ```
-3. **Start Command**:
+3. **Start Command** :
    ```
-   streamlit run gomobile.py --server.port 10000 --server.address 0.0.0.0
+   streamlit run gomobile.py --server.port $PORT --server.address 0.0.0.0
    ```
-4. Choisir une instance **Free** (ou Starter), puis **Deploy**.
+4. **Environment** : `PYTHON_VERSION = 3.13.5`, `STREAMLIT_SERVER_HEADLESS = true`,
+   `APP_BUILD = <date-et-version>` (affiché en bas de la sidebar).
+5. Choisir une instance **Free** (ou Starter), puis **Deploy**.
+
+> 💡 Après un `git push`, Render peut ne pas redéployer automatiquement. Dans ce cas :
+> **Dashboard → ton service → Manual Deploy → Deploy latest commit**.
 
 > 💡 Note : sur le plan Free, Render met le service en veille après inactivité — il se réveille sur la 1ère visite (quelques secondes).
 

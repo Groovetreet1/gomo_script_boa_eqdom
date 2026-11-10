@@ -4,8 +4,10 @@ import pandas as pd
 import zipfile
 import re
 import io
+import hashlib
 from io import BytesIO, StringIO
-from datetime import datetime
+from datetime import datetime, date, time as dt_time, timedelta
+from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
@@ -13,6 +15,29 @@ from openpyxl.styles import Border, Side, Font, Alignment, PatternFill
 import os
 import json
 import math
+
+from gomobile_api import (
+    CANONICAL_LIST_NAMES,
+    GOMOBILE_API_DEFAULT_BASE,
+    GOMOBILE_TIMEZONE,
+    GomobileAPI,
+    GomobileAPIError,
+    audience_name_for_file,
+    build_campaign_payload,
+    build_schedule,
+    did_id,
+    did_label,
+    extract_detected_columns,
+    extract_identity,
+    extract_item,
+    extract_list,
+    find_phone_column,
+    flow_label,
+    iso_datetime,
+    normalize_key,
+    parse_headers_from_bytes,
+    count_value,
+)
 
 # ==============================
 # CONFIG GLOBALE STREAMLIT
@@ -174,6 +199,58 @@ def inject_css():
         [data-testid="stSidebar"] .stTextInput input::placeholder {
             color: #9aa7b3;
         }
+
+        /* ---- GoMobile API ---- */
+        .gm-connected-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            width: 100%;
+            min-height: 38px;
+            background: #16a34a;
+            color: #ffffff !important;
+            font-weight: 800;
+            font-size: .95rem;
+            border-radius: 8px;
+            box-shadow: 0 3px 10px rgba(22, 163, 74, .28);
+            letter-spacing: .2px;
+        }
+        .gm-connected-badge .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #d1fae5;
+            box-shadow: 0 0 0 3px rgba(255,255,255,.18);
+        }
+        .gm-api-card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 16px 18px;
+            margin-bottom: 14px;
+        }
+        .gm-api-card h4 {
+            margin: 0 0 4px;
+            color: var(--navy);
+            font-size: 1rem;
+        }
+        .gm-api-card p {
+            margin: 0;
+            color: var(--muted);
+            font-size: .86rem;
+        }
+        .gm-pill {
+            display: inline-block;
+            padding: 3px 9px;
+            border-radius: 999px;
+            background: #eef4fb;
+            color: var(--navy);
+            font-size: .76rem;
+            font-weight: 700;
+        }
+        .gm-pill.green { background: #dcfce7; color: #166534; }
+        .gm-pill.orange { background: #fef3c7; color: #92400e; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -425,6 +502,9 @@ def normalize_phone(val: str) -> str:
     s = str(val).strip()
     if s.upper() in ("", "NAN", "NA", "NONE"):
         return ""
+    # Excel peut renvoyer 612345678.0 : on retire la partie décimale.
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
     s = re.sub(r"[^\d\+]", "", s)
     if s.startswith("+212"):
         s = "0" + s[4:]
@@ -505,12 +585,35 @@ def df_to_styled_excel_bytes(df: pd.DataFrame) -> io.BytesIO:
     return out
 
 
+def df_to_fast_excel_bytes(df: pd.DataFrame) -> io.BytesIO:
+    """Écrit un XLSX minimaliste (sans style), adapté aux gros imports API."""
+    out = io.BytesIO()
+    df.to_excel(
+        out,
+        index=False,
+        engine="xlsxwriter",
+        engine_kwargs={
+            "options": {
+                "strings_to_formulas": False,
+                "strings_to_urls": False,
+            }
+        },
+    )
+    out.seek(0)
+    return out
+
+
 def app_avt_to_apt():
     st.title("📞 AVT → APT – Nettoyage & Normalisation (GoMobile)")
     st.caption(
         "Dépose tes fichiers AVT (.txt) et récupère des .xlsx prêts : "
         "normalisation, remplissage GSM, filtres Maroc, déduplication, "
         "listing des invalides, export cadrillé, et nommage CLIENT_FIC_*."
+    )
+    st.info(
+        "💡 Après le traitement, retrouvez les listes valides dans l'onglet "
+        "**🚀 Audiences & Campagnes GoMobile** pour créer les audiences, importer "
+        "les contacts via `TEL_GSM` et lancer les campagnes."
     )
 
     uploaded_files = st.file_uploader(
@@ -523,6 +626,7 @@ def app_avt_to_apt():
     if uploaded_files:
         zip_ok = io.BytesIO()
         zip_bad = io.BytesIO()
+        processed_for_api = []
 
         with zipfile.ZipFile(zip_ok, "w", zipfile.ZIP_DEFLATED) as z_ok, \
              zipfile.ZipFile(zip_bad, "w", zipfile.ZIP_DEFLATED) as z_bad:
@@ -550,8 +654,17 @@ def app_avt_to_apt():
                     out_name_ok = f"BOA_FIC_{base_name}.xlsx"
                     out_name_bad = f"BOA_FIC_{base_name}_supprimes.xlsx"
 
-                    # ZIP des valides
-                    z_ok.writestr(out_name_ok, df_to_styled_excel_bytes(df_valid).read())
+                    # Excel valides : réutilisé pour le ZIP et pour l'onglet API
+                    excel_ok = df_to_styled_excel_bytes(df_valid)
+                    excel_ok_bytes = excel_ok.getvalue()
+                    z_ok.writestr(out_name_ok, excel_ok_bytes)
+                    processed_for_api.append(
+                        {
+                            "name": out_name_ok,
+                            "bytes": excel_ok_bytes,
+                            "rows": len(df_valid),
+                        }
+                    )
                     # ZIP des invalides (si présents)
                     if not df_invalid.empty:
                         z_bad.writestr(out_name_bad, df_to_styled_excel_bytes(df_invalid).read())
@@ -568,7 +681,7 @@ def app_avt_to_apt():
                     st.dataframe(df_valid.head(10))
                     st.download_button(
                         "⬇️ Télécharger cet Excel (valides)",
-                        data=df_to_styled_excel_bytes(df_valid),
+                        data=excel_ok,
                         file_name=out_name_ok,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"ok_{f.name}"
@@ -591,6 +704,9 @@ def app_avt_to_apt():
 
                 except Exception as e:
                     st.error(f"Erreur sur {f.name} : {e}")
+
+        # Les listes valides sont réutilisables directement dans l'onglet API
+        st.session_state["boa_processed_lists"] = processed_for_api
 
         # Téléchargements groupés
         zip_ok.seek(0)
@@ -4947,6 +5063,1185 @@ def app_boa_adapter():
 
 
 # ==============================
+# 5) AUTOMATISATION CAMPAGNES GOMOBILE (API)
+# ==============================
+
+def _gomobile_disconnect():
+    """Callback : vide la connexion et les ressources en cache."""
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("gomo_"):
+            st.session_state.pop(key, None)
+    st.session_state["gomo_connected"] = False
+
+
+def _read_uploaded_dataframe(filename: str, data: bytes) -> pd.DataFrame:
+    """Lit un CSV/XLSX/XLS en texte (première feuille)."""
+    lower = str(filename).lower()
+    if lower.endswith(".csv"):
+        last_error = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                return pd.read_csv(
+                    BytesIO(data),
+                    dtype=str,
+                    encoding=encoding,
+                    sep=None,
+                    engine="python",
+                )
+            except UnicodeDecodeError as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise ValueError("Impossible de lire le CSV.")
+    if lower.endswith((".xlsx", ".xls")):
+        return pd.read_excel(BytesIO(data), dtype=str)
+    raise ValueError("Format non supporté. Utilisez XLSX, XLS, CSV ou TXT.")
+
+
+def _prepare_list_for_gomobile(
+    filename: str,
+    data: bytes,
+    phone_column: str = "TEL_GSM",
+    clean: bool = True,
+) -> tuple[str, bytes, list[str], dict]:
+    """Prépare une liste pour l'import GoMobile.
+
+    - TXT AVT : nettoyage BOA (TEL_GSM, filtres Maroc, déduplication).
+    - XLSX/XLS/CSV : normalisation du téléphone + filtre + déduplication
+      (optionnel), puis réécriture en XLSX.
+    """
+    lower = str(filename).lower()
+    stats = {
+        "rows_in": 0,
+        "rows_out": 0,
+        "invalid": 0,
+        "duplicates": 0,
+        "cleaned": False,
+        "phone_column": "",
+    }
+
+    # Fichier AVT brut : on applique exactement les règles de BOA_MARKETING.
+    if lower.endswith(".txt"):
+        df_in = read_avt(BytesIO(data))
+        stats["rows_in"] = len(df_in)
+        df_filled, valid_mask = apply_business_rules(df_in)
+        df_valid = df_filled[valid_mask].copy()
+        stats["invalid"] = int((~valid_mask).sum())
+        before = len(df_valid)
+        df_valid = df_valid.drop_duplicates(subset=["TEL_GSM"], keep="first").copy()
+        stats["duplicates"] = int(before - len(df_valid))
+        stats["rows_out"] = len(df_valid)
+        stats["cleaned"] = True
+        stats["phone_column"] = "TEL_GSM"
+        if df_valid.empty:
+            raise ValueError("Aucune ligne valide après nettoyage du fichier AVT.")
+        out_bytes = df_to_fast_excel_bytes(df_valid).getvalue()
+        return (
+            f"{Path(filename).stem}.xlsx",
+            out_bytes,
+            [str(column) for column in df_valid.columns],
+            stats,
+        )
+
+    df = _read_uploaded_dataframe(filename, data)
+    stats["rows_in"] = len(df)
+    headers = [str(column).strip() for column in df.columns]
+    df.columns = headers
+
+    resolved_phone = (
+        phone_column
+        if phone_column in headers
+        else find_phone_column(headers, phone_column)
+    )
+    if not resolved_phone:
+        raise ValueError(
+            f"Colonne téléphone « {phone_column} » introuvable. "
+            f"Colonnes disponibles : {', '.join(headers)}"
+        )
+    stats["phone_column"] = resolved_phone
+
+    if not clean:
+        stats["rows_out"] = len(df)
+        return filename, data, headers, stats
+
+    df[resolved_phone] = df[resolved_phone].apply(normalize_phone)
+    valid_mask = df[resolved_phone].apply(is_valid_ma_number)
+    stats["invalid"] = int((~valid_mask).sum())
+    df = df[valid_mask].copy()
+
+    before = len(df)
+    df = df.drop_duplicates(subset=[resolved_phone], keep="first").copy()
+    stats["duplicates"] = int(before - len(df))
+    stats["rows_out"] = len(df)
+    stats["cleaned"] = True
+    if df.empty:
+        raise ValueError("Aucune ligne valide après nettoyage des numéros.")
+
+    out_bytes = df_to_fast_excel_bytes(df).getvalue()
+    return (
+        f"{Path(filename).stem}.xlsx",
+        out_bytes,
+        [str(column) for column in df.columns],
+        stats,
+    )
+
+
+def _resolve_api_column_index(
+    upload_response: dict,
+    headers: list[str],
+    phone_column: str,
+) -> int:
+    """Retrouve l'index de la colonne téléphone pour /ingestion/validate."""
+    wanted = normalize_key(phone_column).replace(" ", "")
+    for detected in extract_detected_columns(upload_response):
+        name = normalize_key(detected.get("name", "")).replace(" ", "")
+        if name == wanted:
+            try:
+                return int(detected.get("index"))
+            except (TypeError, ValueError):
+                break
+
+    for index, header in enumerate(headers):
+        if normalize_key(header).replace(" ", "") == wanted:
+            return index
+    raise ValueError(
+        f"Impossible de retrouver la colonne « {phone_column} » dans le fichier envoyé."
+    )
+
+
+def _first_count(mapping: dict, *keys: str) -> Optional[int]:
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        if key in mapping:
+            value = count_value(mapping.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _import_counts(response: dict) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    data = extract_item(response)
+    valid = _first_count(
+        data,
+        "validCount",
+        "validRows",
+        "valid",
+        "validTotal",
+    )
+    invalid = _first_count(
+        data,
+        "invalidCount",
+        "invalidRows",
+        "invalid",
+        "invalidTotal",
+    )
+    existing = _first_count(
+        data,
+        "existingCount",
+        "existingRows",
+        "existing",
+        "existingTotal",
+    )
+    return valid, invalid, existing
+
+
+def render_gomobile_connection_panel() -> bool:
+    """Panneau clé API + bouton Connecter / badge vert Connecté."""
+    st.markdown("### 🔐 Connexion GoMobile API")
+    st.caption(
+        "La clé API reste uniquement en mémoire de la session Streamlit. "
+        "Elle n'est jamais écrite sur disque ni affichée dans les logs."
+    )
+
+    if "gomo_api_key_input" not in st.session_state:
+        st.session_state["gomo_api_key_input"] = st.session_state.get("gomo_api_key", "")
+    if "gomo_api_base_input" not in st.session_state:
+        st.session_state["gomo_api_base_input"] = st.session_state.get(
+            "gomo_api_base", GOMOBILE_API_DEFAULT_BASE
+        )
+
+    connected = bool(st.session_state.get("gomo_connected"))
+    connect_clicked = False
+
+    col_key, col_state = st.columns([3, 1])
+    with col_key:
+        api_key_input = st.text_input(
+            "Clé API GoMobile",
+            type="password",
+            key="gomo_api_key_input",
+            placeholder="Collez votre clé API (X-API-Key)",
+            disabled=connected,
+        )
+    with col_state:
+        st.write("")
+        st.write("")
+        if connected:
+            st.markdown(
+                '<div class="gm-connected-badge"><span class="dot"></span> Connecté</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            connect_clicked = st.button(
+                "🔌 Connecter",
+                type="primary",
+                use_container_width=True,
+                key="gomo_connect_btn",
+            )
+
+    with st.expander("⚙️ Paramètres avancés — URL de l'API", expanded=False):
+        base_input = st.text_input(
+            "URL de base",
+            key="gomo_api_base_input",
+            disabled=connected,
+            help="Par défaut : https://api.gomobile.ma/api",
+        )
+        st.caption(
+            "Utilisez l'URL fournie par GoMobile si votre organisation a un host dédié. "
+            "Le préfixe /api est ajouté automatiquement s'il manque."
+        )
+
+    st.markdown(
+        "[🔑 Créer / gérer une clé API GoMobile]"
+        "(https://app.gomobile.ma/dashboard/api-keys)"
+    )
+
+    if connected:
+        identity = extract_identity(st.session_state.get("gomo_me", {}))
+        details = [identity["name"]]
+        if identity["organization"]:
+            details.append(identity["organization"])
+        if identity["role"]:
+            details.append(f"rôle : {identity['role']}")
+        st.success("Connecté — " + " · ".join(details))
+        st.button(
+            "Déconnecter",
+            key="gomo_disconnect_btn",
+            on_click=_gomobile_disconnect,
+        )
+        return True
+
+    if connect_clicked:
+        key = (api_key_input or "").strip()
+        base = (base_input or GOMOBILE_API_DEFAULT_BASE).strip()
+        if not key:
+            st.error("Collez d'abord votre clé API GoMobile.")
+            return False
+        try:
+            with st.spinner("Vérification de la clé API..."):
+                api = GomobileAPI(key, base)
+                me = api.me()
+        except GomobileAPIError as exc:
+            st.error(f"Connexion impossible : {exc}")
+            return False
+        except Exception as exc:
+            st.error(f"Connexion impossible : {exc}")
+            return False
+
+        st.session_state["gomo_api_key"] = key
+        st.session_state["gomo_api_base"] = api.base_url
+        st.session_state["gomo_me"] = me
+        st.session_state["gomo_connected"] = True
+        st.session_state.pop("gomo_flows", None)
+        st.session_state.pop("gomo_dids", None)
+        st.rerun()
+
+    return False
+
+
+def app_gomobile_api_campaigns():
+    """Audiences + import contacts + campagnes GoMobile, avec relances T1/T2/T3."""
+    st.markdown("## 🚀 Automatisation des campagnes GoMobile")
+    st.caption(
+        "Après traitement des listes : création des audiences, import des contacts "
+        "via la colonne TEL_GSM, puis création et activation des campagnes avec "
+        "3 tentatives le jour du traitement."
+    )
+
+    connected = render_gomobile_connection_panel()
+    if not connected:
+        st.info(
+            "Connectez-vous avec votre clé API pour charger les flows, les numéros "
+            "et lancer l'automatisation."
+        )
+        with st.expander("ℹ️ Comment ça marche ?", expanded=True):
+            st.markdown(
+                """
+                1. **Connexion** : clé API GoMobile (rôle Admin, Manager ou Agent).
+                2. **Listes** : déposez les listes traitées (XLSX, XLS, CSV) ou utilisez
+                   celles de l'onglet **BOA_MARKETING**.
+                3. **Audiences** : `NOM_LISTE JJMMAAAA` — la date est celle du jour
+                   de traitement (modifiable).
+                4. **Contacts** : import via l'API avec la colonne `TEL_GSM`.
+                5. **Campagnes** : même nom que l'audience, flow + DID, tentatives
+                   T1 / T2 / T3 (10:00, 14:00, 16:30 par défaut).
+                """
+            )
+            st.caption(
+                "Noms reconnus automatiquement : "
+                + ", ".join(CANONICAL_LIST_NAMES)
+                + "."
+            )
+        return
+
+    api = GomobileAPI(
+        st.session_state["gomo_api_key"],
+        st.session_state.get("gomo_api_base", GOMOBILE_API_DEFAULT_BASE),
+    )
+
+    # ------------------------------------------------------------------
+    # Chargement des flows et des DID
+    # ------------------------------------------------------------------
+    refresh_col, _ = st.columns([1, 3])
+    with refresh_col:
+        if st.button(
+            "🔄 Recharger flows & numéros",
+            key="gomo_refresh_resources",
+            use_container_width=True,
+        ):
+            st.session_state.pop("gomo_flows", None)
+            st.session_state.pop("gomo_dids", None)
+            st.rerun()
+
+    if "gomo_flows" not in st.session_state:
+        try:
+            with st.spinner("Chargement des flows GoMobile..."):
+                st.session_state["gomo_flows"] = api.list_flows()
+        except Exception as exc:
+            st.session_state["gomo_flows"] = []
+            st.error(f"Impossible de charger les flows : {exc}")
+
+    if "gomo_dids" not in st.session_state:
+        try:
+            with st.spinner("Chargement des numéros disponibles..."):
+                st.session_state["gomo_dids"] = api.list_available_dids()
+        except Exception as exc:
+            st.session_state["gomo_dids"] = []
+            st.warning(f"Numéros non chargés automatiquement : {exc}")
+
+    flows = [
+        flow
+        for flow in st.session_state.get("gomo_flows", [])
+        if isinstance(flow, dict)
+        and str(flow.get("status", "")).lower() != "archived"
+    ]
+    dids = [
+        did
+        for did in st.session_state.get("gomo_dids", [])
+        if isinstance(did, dict)
+    ]
+
+    if not flows:
+        st.warning(
+            "Aucun flow trouvé. Créez au moins un flow Voice ou Multicanale dans "
+            "GoMobile, puis cliquez sur « Recharger flows & numéros »."
+        )
+        st.markdown("[Ouvrir les flows GoMobile](https://app.gomobile.ma/dashboard/flows)")
+        return
+
+    flow_by_label: dict[str, dict] = {}
+    for flow in flows:
+        label = flow_label(flow)
+        if label in flow_by_label:
+            label = f"{label} — {str(flow.get('id', ''))[:8]}"
+        flow_by_label[label] = flow
+
+    flow_labels = list(flow_by_label.keys())
+    default_flow_index = 0
+    for index, label in enumerate(flow_labels):
+        if flow_by_label[label].get("channelType") == "call":
+            default_flow_index = index
+            break
+
+    did_by_label: dict[str, dict] = {}
+    for did in dids:
+        label = did_label(did)
+        if label in did_by_label:
+            label = f"{label} — {did_id(did)[:8]}"
+        did_by_label[label] = did
+
+    # ------------------------------------------------------------------
+    # Paramètres
+    # ------------------------------------------------------------------
+    st.markdown("### 1. Paramètres de la campagne")
+    col_date, col_t1, col_t2, col_t3 = st.columns(4)
+    with col_date:
+        processing_date = st.date_input(
+            "Date de traitement (suffixe audience)",
+            value=datetime.now(GOMOBILE_TIMEZONE).date(),
+            format="DD/MM/YYYY",
+            key="gomo_processing_date",
+        )
+    with col_t1:
+        first_time = st.time_input(
+            "T1 — 1er appel",
+            value=dt_time(10, 0),
+            step=timedelta(minutes=5),
+            key="gomo_t1",
+        )
+    with col_t2:
+        second_time = st.time_input(
+            "T2 — relance 1",
+            value=dt_time(14, 0),
+            step=timedelta(minutes=5),
+            key="gomo_t2",
+        )
+    with col_t3:
+        third_time = st.time_input(
+            "T3 — relance 2",
+            value=dt_time(16, 30),
+            step=timedelta(minutes=5),
+            key="gomo_t3",
+        )
+
+    if not isinstance(processing_date, date):
+        st.error("Choisissez une date de traitement.")
+        return
+
+    col_flow, col_did = st.columns([2, 2])
+    with col_flow:
+        selected_flow_label = st.selectbox(
+            "Flow à exécuter",
+            options=flow_labels,
+            index=default_flow_index,
+            key="gomo_selected_flow",
+        )
+    with col_did:
+        if did_by_label:
+            selected_did_labels = st.multiselect(
+                "Numéros sortants (DID)",
+                options=list(did_by_label.keys()),
+                default=[list(did_by_label.keys())[0]],
+                key="gomo_selected_dids",
+            )
+        else:
+            selected_did_labels = []
+            st.caption(
+                "Aucun DID chargé automatiquement. Saisissez les UUID ci-dessous."
+            )
+
+    with st.expander("➕ DID IDs manuels / options avancées", expanded=False):
+        manual_dids_text = st.text_input(
+            "DID IDs (UUID séparés par des virgules)",
+            key="gomo_manual_dids",
+            help="Utile si la liste automatique des numéros n'est pas accessible.",
+        )
+        timeout_seconds = st.number_input(
+            "Timeout d'appel (secondes)",
+            min_value=5,
+            max_value=120,
+            value=30,
+            step=5,
+            key="gomo_timeout",
+        )
+        enable_amd = st.checkbox(
+            "Détection répondeur (AMD)",
+            value=True,
+            key="gomo_amd",
+        )
+        retry_voicemail = st.checkbox(
+            "Réessayer si répondeur",
+            value=False,
+            key="gomo_retry_voicemail",
+        )
+
+    col_opt1, col_opt2, col_opt3 = st.columns(3)
+    with col_opt1:
+        activate_campaigns = st.checkbox(
+            "Activer les campagnes après création",
+            value=True,
+            key="gomo_activate",
+        )
+        clean_files = st.checkbox(
+            "Nettoyer les numéros & dédupliquer",
+            value=True,
+            key="gomo_clean",
+        )
+    with col_opt2:
+        skip_past = st.checkbox(
+            "Ignorer les relances déjà passées",
+            value=True,
+            key="gomo_skip_past",
+        )
+        allow_duplicate = st.checkbox(
+            "Autoriser un doublon de campagne",
+            value=False,
+            key="gomo_allow_duplicate",
+        )
+    with col_opt3:
+        create_campaigns = st.checkbox(
+            "Créer les campagnes",
+            value=True,
+            key="gomo_create_campaigns",
+        )
+        create_empty = st.checkbox(
+            "Créer la campagne si audience vide",
+            value=False,
+            key="gomo_create_empty",
+        )
+        record_call = st.checkbox(
+            "Enregistrer les appels",
+            value=False,
+            key="gomo_record_call",
+        )
+
+    phone_column_default = st.text_input(
+        "Colonne téléphone par défaut",
+        value="TEL_GSM",
+        key="gomo_phone_col_default",
+        help="Utilisée si la colonne n'est pas détectée automatiquement dans un fichier.",
+    )
+
+    start_at, stop_at, retry_times = build_schedule(
+        processing_date,
+        first_time,
+        second_time,
+        third_time,
+        skip_past=skip_past,
+    )
+    now_local = datetime.now(GOMOBILE_TIMEZONE)
+
+    st.markdown("### 2. Planification")
+    schedule_lines = [
+        f"**T1** : {start_at:%d/%m/%Y %H:%M}",
+    ]
+    if len(retry_times) >= 1:
+        schedule_lines.append(f"**T2** : {retry_times[0]:%d/%m/%Y %H:%M}")
+    else:
+        schedule_lines.append("**T2** : ignorée")
+    if len(retry_times) >= 2:
+        schedule_lines.append(f"**T3** : {retry_times[1]:%d/%m/%Y %H:%M}")
+    else:
+        schedule_lines.append("**T3** : ignorée")
+    st.markdown(" · ".join(schedule_lines))
+    st.caption(
+        "Les heures utilisent le fuseau Africa/Casablanca. "
+        "Les horaires d'appel configurés dans l'organisation restent applicables."
+    )
+    st.caption(
+        "ℹ️ Les relances T2/T3 ne sont envoyées que pour un flow de type **Voice**. "
+        "Pour un flow Multicanale (SMS/WhatsApp), seule la tentative T1 est planifiée."
+    )
+
+    if start_at <= now_local:
+        st.info(
+            "T1 est déjà passée : la campagne démarrera immédiatement à l'activation. "
+            "Les relances passées sont ignorées si l'option est cochée."
+        )
+    if len(retry_times) < 2:
+        st.warning(
+            "Une ou plusieurs relances sont déjà passées. Il y aura donc moins de "
+            "3 tentatives aujourd'hui."
+        )
+    if not skip_past and any(retry <= now_local for retry in retry_times):
+        st.warning(
+            "Les relances passées peuvent être refusées par l'API. "
+            "Activez « Ignorer les relances déjà passées »."
+        )
+
+    # ------------------------------------------------------------------
+    # Listes
+    # ------------------------------------------------------------------
+    st.markdown("### 3. Listes à traiter")
+    uploaded_files = st.file_uploader(
+        "Déposez les listes traitées (XLSX, XLS, CSV ou TXT AVT)",
+        type=["xlsx", "xls", "csv", "txt"],
+        accept_multiple_files=True,
+        key="gomo_lists_uploader",
+    )
+
+    source_files: list[dict] = []
+    for uploaded in uploaded_files or []:
+        source_files.append(
+            {
+                "name": uploaded.name,
+                "bytes": uploaded.getvalue(),
+                "origin": "upload",
+            }
+        )
+
+    boa_lists = st.session_state.get("boa_processed_lists", [])
+    if boa_lists:
+        with st.expander(
+            "📥 Utiliser les listes de l'onglet BOA_MARKETING",
+            expanded=not source_files,
+        ):
+            boa_options = [
+                f"{item['name']} ({item.get('rows', '?')} lignes)"
+                for item in boa_lists
+            ]
+            selected_boa = st.multiselect(
+                "Listes BOA à inclure",
+                options=boa_options,
+                default=boa_options,
+                key="gomo_boa_selection",
+            )
+            for label in selected_boa:
+                item = boa_lists[boa_options.index(label)]
+                source_files.append(
+                    {
+                        "name": item["name"],
+                        "bytes": item["bytes"],
+                        "origin": "boa",
+                    }
+                )
+
+    # Dédoublonne les fichiers identiques (même nom + même contenu).
+    seen_files = set()
+    unique_files = []
+    for item in source_files:
+        signature = (item["name"], hashlib.md5(item["bytes"]).hexdigest())
+        if signature in seen_files:
+            continue
+        seen_files.add(signature)
+        unique_files.append(item)
+    source_files = unique_files
+
+    if not source_files:
+        st.info(
+            "Déposez au moins une liste, ou traitez d'abord des fichiers AVT dans "
+            "l'onglet BOA_MARKETING."
+        )
+        return
+
+    file_infos = []
+    for item in source_files:
+        headers = parse_headers_from_bytes(item["name"], item["bytes"])
+        file_infos.append({**item, "headers": headers})
+
+    editor_rows = []
+    for info in file_infos:
+        default_phone = (
+            find_phone_column(info["headers"], phone_column_default)
+            or (info["headers"][0] if info["headers"] else phone_column_default)
+        )
+        editor_rows.append(
+            {
+                "Inclure": True,
+                "Fichier": info["name"],
+                "Audience": audience_name_for_file(info["name"], processing_date),
+                "Téléphone": default_phone,
+            }
+        )
+
+    all_headers = sorted(
+        {
+            str(header)
+            for info in file_infos
+            for header in info["headers"]
+        }
+    )
+    if phone_column_default not in all_headers:
+        all_headers = [phone_column_default] + all_headers
+
+    content_digest = hashlib.md5()
+    for info in file_infos:
+        content_digest.update(info["name"].encode("utf-8"))
+        content_digest.update(hashlib.md5(info["bytes"]).digest())
+        content_digest.update(str(info.get("origin", "")).encode("utf-8"))
+    files_signature = content_digest.hexdigest()[:10]
+    phone_signature = hashlib.md5(
+        str(phone_column_default or "").strip().casefold().encode("utf-8")
+    ).hexdigest()[:8]
+    editor_key = (
+        f"gomo_lists_editor_{processing_date:%Y%m%d}_"
+        f"{phone_signature}_{files_signature}"
+    )
+
+    st.markdown("### 4. Aperçu et noms des audiences")
+    edited = st.data_editor(
+        pd.DataFrame(editor_rows),
+        key=editor_key,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=["Fichier"],
+        column_config={
+            "Inclure": st.column_config.CheckboxColumn("Inclure", default=True),
+            "Fichier": st.column_config.TextColumn("Fichier"),
+            "Audience": st.column_config.TextColumn(
+                "Nom de l'audience",
+                required=True,
+                max_chars=120,
+            ),
+            "Téléphone": st.column_config.SelectboxColumn(
+                "Colonne téléphone",
+                options=all_headers,
+                required=True,
+            ),
+        },
+    )
+
+    selected_rows = []
+    validation_errors = []
+    for index, row in edited.iterrows():
+        if not bool(row.get("Inclure")):
+            continue
+        info = file_infos[int(index)]
+        audience_name = str(row.get("Audience", "")).strip()
+        phone_column = str(row.get("Téléphone", "")).strip()
+        if not audience_name:
+            validation_errors.append(f"{info['name']} : nom d'audience vide.")
+            continue
+        if phone_column not in info["headers"]:
+            validation_errors.append(
+                f"{info['name']} : colonne « {phone_column} » absente. "
+                f"Colonnes : {', '.join(info['headers']) or 'aucune'}"
+            )
+            continue
+        selected_rows.append((info, audience_name, phone_column))
+
+    if validation_errors:
+        for error in validation_errors:
+            st.error(error)
+
+    selected_flow = flow_by_label[selected_flow_label]
+    flow_channel = str(selected_flow.get("channelType", "") or "")
+
+    selected_did_ids = []
+    for label in selected_did_labels:
+        did = did_by_label.get(label)
+        if did:
+            identifier = did_id(did)
+            if identifier and identifier not in selected_did_ids:
+                selected_did_ids.append(identifier)
+    for raw in re.split(r"[\s,;]+", manual_dids_text or ""):
+        raw = raw.strip()
+        if raw and raw not in selected_did_ids:
+            selected_did_ids.append(raw)
+
+    if flow_channel == "call" and not selected_did_ids:
+        st.error(
+            "Le flow Voice sélectionné nécessite au moins un DID. "
+            "Sélectionnez un numéro ou saisissez un DID ID."
+        )
+    if flow_channel != "call" and not selected_did_ids:
+        st.caption(
+            "Flow non-Voice : aucun DID sélectionné. Si le flow appelle un sous-flow "
+            "Voice, ajoutez un DID."
+        )
+
+    st.markdown("### 5. Doublons existants")
+    selection_signature = hashlib.md5(
+        "|".join(name for _, name, _ in selected_rows).encode("utf-8")
+    ).hexdigest()[:10]
+    if st.button(
+        "🔎 Vérifier les audiences et campagnes existantes",
+        key="gomo_check_duplicates",
+        use_container_width=True,
+        disabled=not selected_rows,
+    ):
+        duplicate_rows = []
+        with st.spinner("Recherche des doublons dans GoMobile..."):
+            for _, audience_name, _ in selected_rows:
+                try:
+                    audiences = api.find_audiences_by_name(audience_name)
+                    campaigns = api.find_campaigns_by_name(audience_name)
+                except GomobileAPIError as exc:
+                    st.error(f"{audience_name} : {exc}")
+                    continue
+                duplicate_rows.append(
+                    {
+                        "Audience / campagne": audience_name,
+                        "Audiences": len(audiences),
+                        "Campagnes": len(campaigns),
+                        "Statuts campagnes": ", ".join(
+                            sorted(
+                                {
+                                    str(campaign.get("status", "") or "?")
+                                    for campaign in campaigns
+                                }
+                            )
+                        ),
+                    }
+                )
+        st.session_state["gomo_duplicate_check"] = {
+            "signature": selection_signature,
+            "rows": duplicate_rows,
+        }
+
+    duplicate_check = st.session_state.get("gomo_duplicate_check")
+    if duplicate_check and duplicate_check.get("signature") == selection_signature:
+        duplicate_rows = duplicate_check.get("rows", [])
+        if duplicate_rows:
+            st.dataframe(
+                pd.DataFrame(duplicate_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+            has_existing = any(
+                row["Audiences"] or row["Campagnes"] for row in duplicate_rows
+            )
+            if has_existing and not allow_duplicate:
+                st.warning(
+                    "Des audiences ou campagnes portent déjà ces noms. Les audiences "
+                    "seront réutilisées et les campagnes actives ne seront pas recréées. "
+                    "Cochez « Autoriser un doublon de campagne » pour forcer la création."
+                )
+        else:
+            st.caption("Aucune audience ni campagne existante pour ces noms.")
+
+    st.markdown("### 6. Lancer")
+    st.warning(
+        "Cette action crée de vrais contacts, audiences et campagnes dans GoMobile. "
+        "Vérifiez les noms, le flow, les DID et la planification avant de lancer."
+    )
+    confirm = st.checkbox(
+        "Je confirme la création des audiences, l'import des contacts et "
+        "l'activation des campagnes.",
+        value=False,
+        key="gomo_confirm",
+    )
+
+    run_disabled = (
+        not confirm
+        or bool(validation_errors)
+        or not selected_rows
+        or (flow_channel == "call" and not selected_did_ids)
+    )
+
+    if st.button(
+        "🚀 Lancer l'automatisation",
+        type="primary",
+        disabled=run_disabled,
+        use_container_width=True,
+        key="gomo_run",
+    ):
+        results = []
+        progress = st.progress(0, text="Démarrage...")
+        status_box = st.status("Automatisation en cours...", expanded=True)
+
+        with status_box:
+            for position, (info, audience_name, phone_column) in enumerate(
+                selected_rows, start=1
+            ):
+                progress.progress(
+                    (position - 1) / max(len(selected_rows), 1),
+                    text=f"{audience_name} ({position}/{len(selected_rows)})",
+                )
+                result = {
+                    "Liste": info["name"],
+                    "Audience": audience_name,
+                    "Audience ID": "",
+                    "Lignes fichier": "",
+                    "Lignes valides": "",
+                    "Invalides": "",
+                    "Doublons": "",
+                    "Importés": "",
+                    "Créés": "",
+                    "Mis à jour": "",
+                    "Échecs": "",
+                    "Liés audience": "",
+                    "Contacts audience": "",
+                    "Campagne": audience_name,
+                    "Campagne ID": "",
+                    "Statut": "",
+                    "Message": "",
+                    "Lien audience": "",
+                    "Lien campagne": "",
+                }
+
+                try:
+                    st.write(f"**{position}/{len(selected_rows)} — {audience_name}**")
+
+                    upload_name, upload_bytes, upload_headers, prep_stats = (
+                        _prepare_list_for_gomobile(
+                            info["name"],
+                            info["bytes"],
+                            phone_column,
+                            clean=clean_files,
+                        )
+                    )
+                    result.update(
+                        {
+                            "Lignes fichier": prep_stats["rows_in"],
+                            "Lignes valides": prep_stats["rows_out"],
+                            "Invalides": prep_stats["invalid"],
+                            "Doublons": prep_stats["duplicates"],
+                        }
+                    )
+                    st.caption(
+                        f"{prep_stats['rows_in']} lignes → "
+                        f"{prep_stats['rows_out']} valides "
+                        f"({prep_stats['invalid']} invalides, "
+                        f"{prep_stats['duplicates']} doublons)."
+                    )
+
+                    # 1) Audience
+                    audience_matches = api.find_audiences_by_name(audience_name)
+                    audience = audience_matches[0] if audience_matches else None
+                    if len(audience_matches) > 1:
+                        st.warning(
+                            f"{len(audience_matches)} audiences portent le nom "
+                            f"« {audience_name} » ; la première sera réutilisée."
+                        )
+                    if audience:
+                        audience_type = str(audience.get("type", "")).lower()
+                        if audience_type and audience_type != "static":
+                            raise GomobileAPIError(
+                                f"L'audience existante « {audience_name} » n'est pas "
+                                f"statique (type={audience_type})."
+                            )
+                        audience_id = str(audience.get("id", ""))
+                        st.write(f"Audience existante réutilisée : `{audience_id}`")
+                    else:
+                        audience = api.create_audience(
+                            audience_name,
+                            description=(
+                                "Audience BOA Marketing — traitement du "
+                                f"{processing_date:%d/%m/%Y}"
+                            ),
+                        )
+                        audience_id = str(audience.get("id", ""))
+                        if not audience_id:
+                            raise GomobileAPIError(
+                                "L'API n'a pas renvoyé l'ID de l'audience créée."
+                            )
+                        st.write(f"Audience créée : `{audience_id}`")
+
+                    result["Audience ID"] = audience_id
+                    result["Lien audience"] = (
+                        "https://app.gomobile.ma/dashboard/audiences/"
+                        f"{audience_id}"
+                    )
+
+                    # 2) Import des contacts
+                    upload_response = api.upload_ingestion(
+                        upload_name,
+                        upload_bytes,
+                        audience_id=audience_id,
+                    )
+                    session_id = str(
+                        upload_response.get("sessionId")
+                        or upload_response.get("session_id")
+                        or ""
+                    )
+                    if not session_id:
+                        raise GomobileAPIError(
+                            "L'API n'a pas renvoyé de sessionId pour l'import."
+                        )
+
+                    column_index = _resolve_api_column_index(
+                        upload_response,
+                        upload_headers,
+                        prep_stats["phone_column"],
+                    )
+                    validate_response = api.validate_ingestion(
+                        session_id,
+                        [{"column": column_index, "field": "primaryPhone"}],
+                    )
+                    valid_count, invalid_count, existing_count = _import_counts(
+                        validate_response
+                    )
+                    st.write(
+                        f"Validation : **{valid_count if valid_count is not None else '?'}** "
+                        f"valides · **{invalid_count if invalid_count is not None else '?'}** "
+                        f"invalides · **{existing_count if existing_count is not None else '?'}** "
+                        "existants."
+                    )
+
+                    execute_response = api.execute_ingestion(session_id)
+                    imported = _first_count(
+                        execute_response,
+                        "importedCount",
+                        "imported",
+                        "successCount",
+                        "totalImported",
+                    )
+                    created = _first_count(
+                        execute_response,
+                        "createdCount",
+                        "created",
+                    )
+                    updated = _first_count(
+                        execute_response,
+                        "updatedCount",
+                        "updated",
+                    )
+                    failed = _first_count(
+                        execute_response,
+                        "failedCount",
+                        "failed",
+                    )
+                    linked = _first_count(
+                        execute_response,
+                        "audienceLinkedCount",
+                        "linkedCount",
+                        "audienceLinked",
+                    )
+                    result.update(
+                        {
+                            "Importés": imported if imported is not None else "",
+                            "Créés": created if created is not None else "",
+                            "Mis à jour": updated if updated is not None else "",
+                            "Échecs": failed if failed is not None else "",
+                            "Liés audience": linked if linked is not None else "",
+                        }
+                    )
+                    st.write(
+                        f"Import : **{imported if imported is not None else '?'}** importés · "
+                        f"**{created if created is not None else '?'}** créés · "
+                        f"**{updated if updated is not None else '?'}** mis à jour · "
+                        f"**{failed if failed is not None else '?'}** échecs · "
+                        f"**{linked if linked is not None else '?'}** liés à l'audience."
+                    )
+
+                    audience_after = api.get_audience(audience_id)
+                    contact_count = count_value(audience_after.get("contactCount"))
+                    result["Contacts audience"] = (
+                        contact_count if contact_count is not None else ""
+                    )
+                    if contact_count is not None:
+                        st.write(f"Audience : **{contact_count}** contact(s) actif(s).")
+                    if (
+                        contact_count == 0
+                        and imported is not None
+                        and imported > 0
+                    ):
+                        st.warning(
+                            "L'audience semble vide malgré l'import. Vérifiez le lien "
+                            "de l'audience dans GoMobile."
+                        )
+
+                    # 3) Campagne
+                    if not create_campaigns:
+                        result["Statut"] = "OK (campagne non créée)"
+                        st.info("Création de campagne désactivée : audience + import terminés.")
+                    else:
+                        existing_campaigns = api.find_campaigns_by_name(audience_name)
+                        terminal_statuses = {"stopped", "completed", "failed"}
+                        blocking_campaigns = [
+                            campaign
+                            for campaign in existing_campaigns
+                            if str(campaign.get("status", "")).lower()
+                            not in terminal_statuses
+                        ]
+                        existing_campaign = (
+                            blocking_campaigns[0]
+                            if blocking_campaigns
+                            else (existing_campaigns[0] if existing_campaigns else None)
+                        )
+                        existing_status = (
+                            str(existing_campaign.get("status", "")).lower()
+                            if existing_campaign
+                            else ""
+                        )
+
+                        if blocking_campaigns and not allow_duplicate:
+                            result["Campagne ID"] = str(
+                                existing_campaign.get("id", "")
+                            )
+                            result["Statut"] = "Ignorée (campagne existante)"
+                            result["Message"] = (
+                                f"{len(blocking_campaigns)} campagne(s) existante(s) "
+                                f"au statut « {existing_status} ». "
+                                "Cochez « Autoriser un doublon de campagne » pour en créer "
+                                "une nouvelle."
+                            )
+                            st.warning(result["Message"])
+                        elif contact_count == 0 and not create_empty:
+                            result["Statut"] = "Ignorée (audience vide)"
+                            result["Message"] = (
+                                "Aucun contact actif dans l'audience. La campagne n'a "
+                                "pas été créée."
+                            )
+                            st.warning(result["Message"])
+                        else:
+                            payload = build_campaign_payload(
+                                name=audience_name,
+                                description=(
+                                    "Créée automatiquement par BOA Marketing — "
+                                    f"traitement du {processing_date:%d/%m/%Y}"
+                                ),
+                                flow=selected_flow,
+                                audience_id=audience_id,
+                                did_ids=selected_did_ids,
+                                start_at=start_at,
+                                stop_at=stop_at,
+                                retry_times=retry_times,
+                                timeout_ms=int(timeout_seconds) * 1000,
+                                enable_amd=bool(enable_amd),
+                                record_call=bool(record_call),
+                                retry_on_voicemail=bool(retry_voicemail),
+                            )
+                            campaign = api.create_campaign(payload)
+                            campaign_id = str(campaign.get("id", ""))
+                            if not campaign_id:
+                                raise GomobileAPIError(
+                                    "L'API n'a pas renvoyé l'ID de la campagne créée."
+                                )
+                            result["Campagne ID"] = campaign_id
+                            result["Lien campagne"] = (
+                                "https://app.gomobile.ma/dashboard/campaigns/"
+                                f"{campaign_id}"
+                            )
+
+                            campaign_status = str(
+                                campaign.get("status", "draft")
+                            )
+                            if activate_campaigns:
+                                activation = api.activate_campaign(campaign_id)
+                                campaign_status = str(
+                                    activation.get("status", campaign_status)
+                                )
+                                st.write(
+                                    f"Campagne créée et activée : `{campaign_id}` "
+                                    f"(statut **{campaign_status}**)."
+                                )
+                            else:
+                                st.write(
+                                    f"Campagne créée en brouillon : `{campaign_id}`."
+                                )
+
+                            result["Statut"] = "OK"
+                            result["Message"] = (
+                                f"Campagne {campaign_status}. "
+                                f"Tentatives : {1 + len(retry_times)}."
+                            )
+
+                except GomobileAPIError as exc:
+                    result["Statut"] = "Erreur API"
+                    result["Message"] = str(exc)
+                    st.error(f"{audience_name} : {exc}")
+                except Exception as exc:
+                    result["Statut"] = "Erreur"
+                    result["Message"] = str(exc)
+                    st.error(f"{audience_name} : {exc}")
+
+                results.append(result)
+
+            progress.progress(1.0, text="Terminé")
+
+        if any(row["Statut"].startswith("Erreur") for row in results):
+            status_box.update(label="Terminé avec erreurs", state="error")
+        else:
+            status_box.update(label="Automatisation terminée", state="complete")
+
+        st.session_state["gomo_last_results"] = {
+            "date": f"{processing_date:%d/%m/%Y}",
+            "rows": results,
+        }
+
+    # Résultats persistants (restent visibles après un rerun)
+    last_results = st.session_state.get("gomo_last_results")
+    if last_results and last_results.get("rows"):
+        st.markdown("### 📊 Résultat de la dernière exécution")
+        st.caption(f"Traitement du {last_results.get('date', '')}")
+        results_df = pd.DataFrame(last_results["rows"])
+        st.dataframe(results_df, hide_index=True, use_container_width=True)
+        st.download_button(
+            "⬇️ Télécharger le rapport CSV",
+            data=results_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=(
+                "BOA_CAMPAGNES_"
+                f"{datetime.now(GOMOBILE_TIMEZONE):%Y%m%d_%H%M}.csv"
+            ),
+            mime="text/csv",
+            key="gomo_download_report",
+        )
+
+
+# ==============================
 # ROUTEUR PRINCIPAL (MENU)
 # ==============================
 
@@ -4976,6 +6271,7 @@ app_choice = st.sidebar.radio(
         "EQDOM_MARKETING",
         "TRAITEMENT_AGENCE",
         "BOA_MARKETING",
+        "AUTOMATISATION_CAMPAGNES",
         "BOA_REPORT_GENERATOR",
     ),
     key="main_app_choice"
@@ -4988,8 +6284,29 @@ elif app_choice == "TRAITEMENT_AGENCE":
     app_hero("Traitement Fichiers Agence", "RMA · CAT · MAMDA Admin · MAMDA API — Détection auto & mise en forme")
     app_traitement_agence()
 elif app_choice == "BOA_MARKETING":
-    app_hero("AVT → APT · Nettoyage", "Normalisation de fichiers GoMobile (AVT vers APT)")
-    app_avt_to_apt()
+    app_hero(
+        "BOA_MARKETING",
+        "Nettoyage AVT → APT + automatisation des audiences et campagnes GoMobile",
+    )
+    tab_boa, tab_api = st.tabs(
+        [
+            "🧹 Nettoyage AVT → APT",
+            "🚀 Audiences & Campagnes GoMobile",
+        ]
+    )
+    with tab_boa:
+        app_avt_to_apt()
+    with tab_api:
+        app_gomobile_api_campaigns()
+elif app_choice == "AUTOMATISATION_CAMPAGNES":
+    app_hero(
+        "Automatisation Campagnes GoMobile",
+        "Audiences · Import contacts TEL_GSM · Campagnes · Relances T1/T2/T3",
+    )
+    app_gomobile_api_campaigns()
+elif app_choice == "BOA_REPORT_GENERATOR":
+    app_hero("Génération IN_REPORT & IN_SVI", "Croisement des exports GoMobile pour générer les fichiers IN")
+    app_boa_adapter()
 else:
     app_hero("Génération IN_REPORT & IN_SVI", "Croisement des exports GoMobile pour générer les fichiers IN")
     app_boa_adapter()

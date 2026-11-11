@@ -20,4 +20,4 @@ services:
         value: poll
       # Marqueur de version affiché dans la sidebar (README)
       - key: APP_BUILD
-        value: 2026-11-10-automatisation-campagnes
+        value: 2026-11-11-boa-batch-api-in-files

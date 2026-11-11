@@ -4999,6 +4999,21 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             mime="application/zip",
             key="boa_batch_zip",
         )
+        # Lien de secours (data URI) si le bouton Streamlit échoue sur Render
+        try:
+            import base64
+            _zip_b64 = base64.b64encode(last.get("zip_bytes", b"")).decode("ascii")
+            _zip_name = last.get("zip_name", "BOA_IN_FILES.zip")
+            st.markdown(
+                f'<a download="{_zip_name}" href="data:application/zip;base64,{_zip_b64}" '
+                'style="display:inline-block;padding:0.5rem 1rem;background:#2563eb;color:white;'
+                'border-radius:0.5rem;text-decoration:none;font-weight:600;">'
+                "⬇️ Télécharger le ZIP (lien direct)</a>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Si le bouton ci-dessus ne télécharge pas, utilise ce lien direct (même fichier).")
+        except Exception:
+            pass
 
         st.subheader("👁 Aperçus par campagne")
         for item in last.get("results", []):

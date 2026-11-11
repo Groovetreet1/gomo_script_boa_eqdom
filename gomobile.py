@@ -4865,117 +4865,125 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         call_source == "Fichiers d'appels (CSV/Excel)" or boa_api is not None
     )
     if st.button("🚀 Lancer la génération batch", disabled=not can_run, key="boa_batch_run"):
-        with st.spinner("Traitement de toutes les campagnes..."):
-            treatment_date_val = treatment_date.strip() if treatment_date else None
-            if treatment_date_val and not re.match(r"^\d{4}\.\d{2}\.\d{2}$", treatment_date_val):
-                st.warning("Format date invalide, utilisation de la date du jour.")
-                treatment_date_val = None
+        try:
+            with st.spinner("Traitement de toutes les campagnes..."):
+                treatment_date_val = treatment_date.strip() if treatment_date else None
+                if treatment_date_val and not re.match(r"^\d{4}\.\d{2}\.\d{2}$", treatment_date_val):
+                    st.warning("Format date invalide, utilisation de la date du jour.")
+                    treatment_date_val = None
 
-            if call_source != "Fichiers d'appels (CSV/Excel)" and boa_api is not None:
-                fetch_status = st.status("Récupération des appels via API GoMobile...", expanded=True)
-                with fetch_status:
-                    for c in ready:
-                        camp = api_campaign_map.get(c["prefix"])
-                        if not camp:
-                            st.warning(f"{c['prefix']} : campagne introuvable sur GoMobile, 0 appel.")
-                            c["calls"] = []
-                            continue
-                        camp_id = str(camp.get("id", ""))
-                        try:
-                            st.write(f"Export des appels : **{camp.get('name', c['prefix'])}** (`{camp_id}`)…")
-                            records = boa_api.fetch_calls_export_records(
-                                {"campaignId": camp_id},
-                                poll_interval=2.0,
-                                timeout=300.0,
-                            )
-                            c["calls"] = records or []
-                            st.write(f"→ **{len(c['calls'])}** appel(s) récupéré(s).")
-                            if c["calls"]:
-                                sample = c["calls"][0] if isinstance(c["calls"][0], dict) else {}
-                                cols = list(sample.keys())[:40]
-                                with st.expander(f"Colonnes détectées — {c['prefix']}", expanded=False):
-                                    st.code("\n".join(str(x) for x in cols) or "(aucune)")
-                                    # aperçu normalisé des champs clés
-                                    st.caption("Aperçu 1er appel (champs utiles)")
-                                    preview = {
-                                        k: sample.get(k, "")
-                                        for k in [
-                                            "phone", "telephone", "tel", "to",
-                                            "call outcome", "outcome", "callOutcome",
-                                            "answered by", "answered_by", "answeredBy",
-                                            "duration (s)", "duration", "durationMs",
-                                            "dtmf", "input", "cle_contact", "id",
-                                        ]
-                                        if sample.get(k) not in (None, "")
-                                    }
-                                    st.json(preview or {"info": "aucun champ clé détecté — vérifiez les colonnes ci-dessus"})
-                        except Exception as e:
-                            c["calls"] = []
-                            st.error(f"{c['prefix']} : échec récupération appels — {e}")
-                if all(not c.get("calls") for c in ready):
-                    fetch_status.update(label="Aucun appel récupéré", state="error")
-                else:
-                    fetch_status.update(label="Appels récupérés", state="complete")
-
-            zip_buffer = io.BytesIO()
-            summary_rows = []
-            results = []
-            batch_date_compact = None
-
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for c in ready:
-                    prefix = c["prefix"]
-                    out_svi_records = parse_out_svi(c["svi_content"])
-                    out_report_rows = parse_out_report(c["report_content"])
-                    calls = c.get("calls", [])
-
-                    if out_report_rows:
-                        date_compact = out_report_rows[0]["dateGeneration"].replace(".", "")
+                if call_source != "Fichiers d'appels (CSV/Excel)" and boa_api is not None:
+                    fetch_status = st.status("Récupération des appels via API GoMobile...", expanded=True)
+                    with fetch_status:
+                        for c in ready:
+                            camp = api_campaign_map.get(c["prefix"])
+                            if not camp:
+                                st.warning(f"{c['prefix']} : campagne introuvable sur GoMobile, 0 appel.")
+                                c["calls"] = []
+                                continue
+                            camp_id = str(camp.get("id", ""))
+                            try:
+                                st.write(f"Export des appels : **{camp.get('name', c['prefix'])}** (`{camp_id}`)…")
+                                records = boa_api.fetch_calls_export_records(
+                                    {"campaignId": camp_id},
+                                    poll_interval=2.0,
+                                    timeout=300.0,
+                                )
+                                c["calls"] = records or []
+                                st.write(f"→ **{len(c['calls'])}** appel(s) récupéré(s).")
+                                if c["calls"]:
+                                    sample = c["calls"][0] if isinstance(c["calls"][0], dict) else {}
+                                    cols = list(sample.keys())[:40]
+                                    with st.expander(f"Colonnes détectées — {c['prefix']}", expanded=False):
+                                        st.code("\n".join(str(x) for x in cols) or "(aucune)")
+                                        st.caption("Aperçu 1er appel (champs utiles)")
+                                        preview = {
+                                            k: sample.get(k, "")
+                                            for k in [
+                                                "phone", "telephone", "tel", "to",
+                                                "call outcome", "outcome", "callOutcome",
+                                                "answered by", "answered_by", "answeredBy",
+                                                "duration (s)", "duration", "durationMs",
+                                                "dtmf", "input", "cle_contact", "id",
+                                            ]
+                                            if sample.get(k) not in (None, "")
+                                        }
+                                        st.json(preview or {"info": "aucun champ clé détecté — vérifiez les colonnes ci-dessus"})
+                            except Exception as e:
+                                c["calls"] = []
+                                st.error(f"{c['prefix']} : échec récupération appels — {e}")
+                    if all(not c.get("calls") for c in ready):
+                        fetch_status.update(label="Aucun appel récupéré", state="error")
                     else:
-                        date_compact = c.get("date_compact") or reference_date_compact
+                        fetch_status.update(label="Appels récupérés", state="complete")
 
-                    if batch_date_compact is None:
-                        batch_date_compact = date_compact
+                zip_buffer = io.BytesIO()
+                summary_rows = []
+                results = []
+                batch_date_compact = None
 
-                    in_report = generate_in_report(
-                        out_svi_records, out_report_rows, calls,
-                        audio_duration, treatment_date_val, prefix, date_compact,
-                    )
-                    in_svi = generate_in_svi(
-                        out_svi_records, calls, date_compact, prefix, date_compact,
-                    )
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for c in ready:
+                        prefix = c["prefix"]
+                        out_svi_records = parse_out_svi(c["svi_content"])
+                        out_report_rows = parse_out_report(c["report_content"])
+                        calls = c.get("calls", [])
 
-                    zf.writestr(in_report["filename"], in_report["content"].encode("utf-8"))
-                    zf.writestr(in_svi["filename"], in_svi["content"].encode("utf-8"))
+                        if out_report_rows:
+                            date_compact = out_report_rows[0]["dateGeneration"].replace(".", "")
+                        else:
+                            date_compact = c.get("date_compact") or reference_date_compact
 
-                    s = in_report["stats"]
-                    summary_rows.append({
-                        "Campagne": prefix,
-                        "Campagne GoMobile": c.get("campaign_name", ""),
-                        "IN_SVI lignes DTMF": in_svi["recordCount"],
-                        "Appels": s["totalCalls"],
-                        "Contacts total": s["contactsTotal"],
-                        "Décrochés": s["decroches"],
-                        "Écoutes": s["ecoutes"],
-                        "Interactions (DTMF)": s["interactions"],
-                    })
-                    results.append({
-                        "prefix": prefix,
-                        "in_report_filename": in_report["filename"],
-                        "in_report_content": in_report["content"],
-                        "in_svi_filename": in_svi["filename"],
-                        "in_svi_content": in_svi["content"],
-                        "in_svi_count": in_svi["recordCount"],
-                    })
+                        if batch_date_compact is None:
+                            batch_date_compact = date_compact
 
-            zip_buffer.seek(0)
-            zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime("%Y%m%d")
-            st.session_state["boa_batch_last"] = {
-                "zip_bytes": zip_buffer.getvalue(),
-                "zip_name": f"BOA_IN_FILES_{zip_file_date}.zip",
-                "summary_rows": summary_rows,
-                "results": results,
-            }
+                        in_report = generate_in_report(
+                            out_svi_records, out_report_rows, calls,
+                            audio_duration, treatment_date_val, prefix, date_compact,
+                        )
+                        in_svi = generate_in_svi(
+                            out_svi_records, calls, date_compact, prefix, date_compact,
+                        )
+
+                        zf.writestr(in_report["filename"], in_report["content"].encode("utf-8"))
+                        zf.writestr(in_svi["filename"], in_svi["content"].encode("utf-8"))
+
+                        s = in_report["stats"]
+                        summary_rows.append({
+                            "Campagne": prefix,
+                            "Campagne GoMobile": c.get("campaign_name", ""),
+                            "IN_SVI lignes DTMF": in_svi["recordCount"],
+                            "Appels": s["totalCalls"],
+                            "Contacts total": s["contactsTotal"],
+                            "Décrochés": s["decroches"],
+                            "Écoutes": s["ecoutes"],
+                            "Interactions (DTMF)": s["interactions"],
+                        })
+                        results.append({
+                            "prefix": prefix,
+                            "in_report_filename": in_report["filename"],
+                            "in_report_content": in_report["content"],
+                            "in_svi_filename": in_svi["filename"],
+                            "in_svi_content": in_svi["content"],
+                            "in_svi_count": in_svi["recordCount"],
+                        })
+
+                zip_buffer.seek(0)
+                zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime("%Y%m%d")
+                st.session_state["boa_batch_last"] = {
+                    "zip_bytes": zip_buffer.getvalue(),
+                    "zip_name": f"BOA_IN_FILES_{zip_file_date}.zip",
+                    "summary_rows": summary_rows,
+                    "results": results,
+                }
+                st.session_state.pop("boa_batch_error", None)
+        except Exception as exc:
+            import traceback
+            st.session_state["boa_batch_error"] = f"{exc}"
+            st.session_state["boa_batch_traceback"] = traceback.format_exc()
+            st.error(f"Erreur pendant la génération : {exc}")
+            with st.expander("Détails techniques", expanded=False):
+                st.code(traceback.format_exc())
 
     # Affichage des résultats (persistant pour permettre le téléchargement)
     last = st.session_state.get("boa_batch_last")
@@ -4999,11 +5007,25 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             with st.expander(f"{prefix} — IN_SVI ({count} lignes DTMF)"):
                 st.markdown(f"**{item.get('in_report_filename','')}** (IN_REPORT)")
                 st.text(item.get("in_report_content", ""))
+                st.download_button(
+                    f"⬇️ {item.get('in_report_filename','IN_REPORT.txt')}",
+                    data=str(item.get("in_report_content", "")).encode("utf-8"),
+                    file_name=item.get("in_report_filename", "IN_REPORT.txt"),
+                    mime="text/plain",
+                    key=f"boa_dl_report_{prefix}",
+                )
                 st.markdown(f"**{item.get('in_svi_filename','')}** (IN_SVI)")
                 if count > 0:
                     st.text(item.get("in_svi_content", ""))
                 else:
                     st.info("Aucun contact n'a pressé de touche DTMF.")
+                st.download_button(
+                    f"⬇️ {item.get('in_svi_filename','IN_SVI.txt')}",
+                    data=str(item.get("in_svi_content", "")).encode("utf-8"),
+                    file_name=item.get("in_svi_filename", "IN_SVI.txt"),
+                    mime="text/plain",
+                    key=f"boa_dl_svi_{prefix}",
+                )
 
 
 def app_boa_adapter():

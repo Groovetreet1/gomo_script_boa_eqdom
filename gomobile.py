@@ -4959,35 +4959,52 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                         "Écoutes": s["ecoutes"],
                         "Interactions (DTMF)": s["interactions"],
                     })
-                    results.append((prefix, in_report, in_svi))
+                    results.append({
+                        "prefix": prefix,
+                        "in_report_filename": in_report["filename"],
+                        "in_report_content": in_report["content"],
+                        "in_svi_filename": in_svi["filename"],
+                        "in_svi_content": in_svi["content"],
+                        "in_svi_count": in_svi["recordCount"],
+                    })
 
             zip_buffer.seek(0)
+            zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime("%Y%m%d")
+            st.session_state["boa_batch_last"] = {
+                "zip_bytes": zip_buffer.getvalue(),
+                "zip_name": f"BOA_IN_FILES_{zip_file_date}.zip",
+                "summary_rows": summary_rows,
+                "results": results,
+            }
 
-        st.success("✅ Batch terminé avec succès !")
-
+    # Affichage des résultats (persistant pour permettre le téléchargement)
+    last = st.session_state.get("boa_batch_last")
+    if last:
+        st.success("✅ Batch prêt — fichiers IN générés.")
         st.subheader("📊 Tableau récapitulatif (Campagne → lignes DTMF IN_SVI)")
-        st.dataframe(pd.DataFrame(summary_rows), width="stretch")
+        st.dataframe(pd.DataFrame(last.get("summary_rows", [])), width="stretch")
 
-        zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime("%Y%m%d")
         st.download_button(
             "📥 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
-            data=zip_buffer,
-            file_name=f"BOA_IN_FILES_{zip_file_date}.zip",
+            data=last.get("zip_bytes", b""),
+            file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
             mime="application/zip",
             key="boa_batch_zip",
         )
 
         st.subheader("👁 Aperçus par campagne")
-        for prefix, in_report, in_svi in results:
-            with st.expander(f"{prefix} — IN_SVI ({in_svi['recordCount']} lignes DTMF)"):
-                st.markdown(f"**{in_report['filename']}** (IN_REPORT)")
-                st.text(in_report["content"])
-                st.markdown(f"**{in_svi['filename']}** (IN_SVI)")
-                if in_svi["recordCount"] > 0:
-                    st.text(in_svi["content"])
+        for item in last.get("results", []):
+            prefix = item.get("prefix", "")
+            count = item.get("in_svi_count", 0)
+            with st.expander(f"{prefix} — IN_SVI ({count} lignes DTMF)"):
+                st.markdown(f"**{item.get('in_report_filename','')}** (IN_REPORT)")
+                st.text(item.get("in_report_content", ""))
+                st.markdown(f"**{item.get('in_svi_filename','')}** (IN_SVI)")
+                if count > 0:
+                    st.text(item.get("in_svi_content", ""))
                 else:
                     st.info("Aucun contact n'a pressé de touche DTMF.")
-# ─── Streamlit App BOA Adapter ───────────────────────────────────────────────
+
 
 def app_boa_adapter():
     st.title("🔗 BOA Adapter – Génération IN_REPORT & IN_SVI")

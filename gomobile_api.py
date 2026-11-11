@@ -696,6 +696,55 @@ class GomobileAPI:
     def me(self) -> Any:
         return self.get("/users/me")
 
+    def validate_connection(self) -> Any:
+        """Valide la clé API et renvoie les infos de compte si disponibles.
+
+        Certains environnements GoMobile n'autorisent pas `GET /users/me` avec
+        une clé API (403 FORBIDDEN). Dans ce cas on valide l'accès via un
+        endpoint de lecture autorisé par la clé (flows, audiences, campagnes).
+        """
+        try:
+            return self.get("/users/me")
+        except GomobileAPIError as exc:
+            # 401 = clé invalide/expirée/révoquée -> erreur réelle.
+            if exc.status_code == 401:
+                raise
+            # 403/404 sur /users/me : endpoint non accessible avec une clé API.
+            # On tente des endpoints de lecture pour confirmer l'authentification.
+            if exc.status_code not in (403, 404):
+                raise
+
+            probes = (
+                "/flows",
+                "/audience",
+                "/campaigns",
+                "/dids/available",
+                "/dids",
+            )
+            last_error: Optional[GomobileAPIError] = exc
+            for path in probes:
+                try:
+                    self.get(path, params={"page": 1, "limit": 1})
+                    return {
+                        "user": {"fullName": "Clé API"},
+                        "_validated_via": path,
+                    }
+                except GomobileAPIError as probe_exc:
+                    last_error = probe_exc
+                    # 401 = clé invalide -> remonter immédiatement.
+                    if probe_exc.status_code == 401:
+                        raise
+                    # 403/404 sur ce probe : essayer le suivant (permission/service).
+                    if probe_exc.status_code in (403, 404):
+                        continue
+                    # Autre erreur (5xx, réseau mappé, etc.) : on la conserve
+                    # mais on tente quand même les autres probes.
+                    continue
+
+            # Aucun probe n'a confirmé l'accès : on remonte l'erreur la plus
+            # parlante (la dernière rencontrée).
+            raise last_error or exc
+
     # -- Audiences --------------------------------------------------------
     def list_audiences(self, search: Optional[str] = None) -> list:
         params = {"search": search} if search else None

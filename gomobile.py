@@ -5329,7 +5329,7 @@ def render_gomobile_connection_panel() -> bool:
         try:
             with st.spinner("Vérification de la clé API..."):
                 api = GomobileAPI(key, base)
-                me = api.me()
+                me = api.validate_connection()
         except GomobileAPIError as exc:
             st.error(f"Connexion impossible : {exc}")
             return False

@@ -510,6 +510,52 @@ def build_campaign_payload(
 # Client HTTP
 # ---------------------------------------------------------------------------
 
+
+def _parse_call_export_bytes(content: bytes) -> list[dict]:
+    """Parse un export d'appels GoMobile (CSV ou Excel) en liste de dicts."""
+    if not content:
+        return []
+
+    # Excel ?
+    if content[:2] == b"PK" or content[:4] == b"\xd0\xcf\x11\xe0":
+        try:
+            df = pd.read_excel(BytesIO(content), dtype=str)
+            return df.fillna("").to_dict("records")
+        except Exception:
+            pass
+
+    # CSV / texte
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = content.decode("utf-8", errors="replace")
+
+    # D?tecter le s?parateur
+    sample = "\n".join(text.splitlines()[:5])
+    sep = ","
+    try:
+        import csv
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
+        sep = dialect.delimiter
+    except Exception:
+        if sample.count(";") > sample.count(","):
+            sep = ";"
+
+    try:
+        df = pd.read_csv(BytesIO(text.encode("utf-8")), sep=sep, dtype=str)
+    except Exception:
+        try:
+            df = pd.read_csv(BytesIO(text.encode("utf-8")), dtype=str)
+        except Exception:
+            return []
+    return df.fillna("").to_dict("records")
+
+
 class GomobileAPI:
     """Petit client REST pour https://api.gomobile.ma/api."""
 
@@ -868,3 +914,109 @@ class GomobileAPI:
 
     def get_campaign(self, campaign_id: str) -> dict:
         return extract_item(self.get(f"/campaigns/{campaign_id}"))
+
+
+    # -- Appels / exports -------------------------------------------------
+    def list_calls(self, **params) -> list:
+        """Liste les appels (legs voix). Param?tres : campaignId, contactId,
+        from/to (ISO), outcome, source, page/limit, etc."""
+        clean = {k: v for k, v in params.items() if v not in (None, "", [])}
+        return self._paginate("/calls", params=clean or None)
+
+    def create_calls_export(self, filters: Optional[dict] = None) -> dict:
+        """Cr?e un export CSV asynchrone des appels (m?mes filtres que GET /calls)."""
+        body = {k: v for k, v in (filters or {}).items() if v not in (None, "", [])}
+        return extract_item(self.post("/calls/export", json_body=body, timeout=120))
+
+    def get_calls_export(self, export_id: str) -> dict:
+        """Statut d'un export d'appels (completed ? URL de t?l?chargement)."""
+        return extract_item(self.get(f"/calls/exports/{export_id}"))
+
+    def download_calls_export(
+        self,
+        export_id: str,
+        poll_interval: float = 2.0,
+        timeout: float = 300.0,
+    ) -> bytes:
+        """Attend la fin d'un export d'appels et t?l?charge le CSV."""
+        deadline = time.time() + max(timeout, 10.0)
+        last_status = ""
+        while time.time() < deadline:
+            info = self.get_calls_export(export_id)
+            last_status = str(_first(info, "status", "state", default="") or "").lower()
+            if last_status == "completed":
+                url = _first(
+                    info,
+                    "url",
+                    "downloadUrl",
+                    "downloadURL",
+                    "fileUrl",
+                    "fileURL",
+                    "signedUrl",
+                    "signedURL",
+                    default="",
+                )
+                if not url:
+                    for key in ("data", "file", "result", "export"):
+                        nested = info.get(key)
+                        if isinstance(nested, dict):
+                            url = _first(
+                                nested,
+                                "url",
+                                "downloadUrl",
+                                "downloadURL",
+                                "fileUrl",
+                                "signedUrl",
+                                default="",
+                            )
+                            if url:
+                                break
+                if not url:
+                    raise GomobileAPIError(
+                        "L'export est termin? mais aucune URL de t?l?chargement n'a ?t? renvoy?e.",
+                        payload=info,
+                    )
+                try:
+                    resp = self.session.get(str(url), timeout=self.timeout)
+                    if resp.status_code in (401, 403):
+                        resp = self.session.get(
+                            str(url),
+                            headers=self._auth_headers(),
+                            timeout=self.timeout,
+                        )
+                    resp.raise_for_status()
+                    return resp.content
+                except requests.RequestException as exc:
+                    raise GomobileAPIError(
+                        f"Impossible de t?l?charger l'export d'appels : {exc}"
+                    ) from exc
+            if last_status in {"failed", "error", "cancelled", "canceled"}:
+                raise GomobileAPIError(
+                    f"L'export d'appels a ?chou? (statut : {last_status or '?'})",
+                    payload=info,
+                )
+            time.sleep(max(poll_interval, 0.5))
+
+        raise GomobileAPIError(
+            f"Export d'appels non termin? apr?s {int(timeout)}s (dernier statut : {last_status or '?'})"
+        )
+
+    def fetch_calls_export_records(
+        self,
+        filters: Optional[dict] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 300.0,
+    ) -> list[dict]:
+        """Exporte les appels filtr?s et renvoie les lignes sous forme de dicts."""
+        export = self.create_calls_export(filters)
+        export_id = str(
+            _first(export, "id", "exportId", "export_id", "jobId", "job_id", default="")
+        )
+        if not export_id:
+            raise GomobileAPIError(
+                "L'API n'a pas renvoy? d'identifiant pour l'export d'appels.",
+                payload=export,
+            )
+        content = self.download_calls_export(export_id, poll_interval, timeout)
+        return _parse_call_export_bytes(content)
+

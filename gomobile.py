@@ -4225,6 +4225,38 @@ CALL_PREFIX_TO_OUT = {
     'WLCM': 'WELCOME',
 }
 
+# Prefixe OUT (nom de fichier/campagne) -> nom canonique de campagne GoMobile
+OUT_PREFIX_TO_CAMPAIGN_BASE = {
+    'ACTIVATION': 'ACTIVATION',
+    'ATTRITIONS': 'ATTRITIONS',
+    'CARTENACTIVE': 'CARTE NON ACTIVE',
+    'CARTENONACTIVE': 'CARTE NON ACTIVE',
+    'CARTENREMISE': 'CARTE NON REMISE',
+    'CARTENONREMISE': 'CARTE NON REMISE',
+    'WELCOME': 'WELCOME',
+    'WLCM': 'WELCOME',
+}
+
+
+def _campaign_name_from_prefix(prefix: str, date_compact: str) -> str:
+    """Construit le nom de campagne GoMobile (ex. ACTIVATION 10112026)."""
+    key = normalize_key(prefix).replace(' ', '')
+    base = OUT_PREFIX_TO_CAMPAIGN_BASE.get(key)
+    if not base:
+        norm_prefix = normalize_key(prefix)
+        for name in CANONICAL_LIST_NAMES:
+            if normalize_key(name).replace(' ', '') == key or normalize_key(name) == norm_prefix:
+                base = name
+                break
+    if not base:
+        base = str(prefix).strip().upper()
+    # date_compact YYYYMMDD -> DDMMYYYY
+    if date_compact and len(date_compact) == 8 and str(date_compact).isdigit():
+        suffix = f"{date_compact[6:8]}{date_compact[4:6]}{date_compact[0:4]}"
+        return f"{base} {suffix}"
+    return base
+
+
 # ─── Parsers ─────────────────────────────────────────────────────────────────
 
 def parse_out_svi(content: str) -> list[dict]:
@@ -4630,99 +4662,258 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
     """Mode BATCH : plusieurs campagnes → ZIP de tous les IN_REPORT + IN_SVI + tableau récap."""
 
     # ── Étape 1 : OUT fichiers ──
-    st.subheader("📁 Étape 1 : Déposer tous les fichiers OUT (.txt)")
+    st.subheader("📥 Étape 1 : Déposer tous les fichiers OUT (.txt)")
     uploaded_txt = st.file_uploader(
         "Glisser-déposer TOUS les OUT_SVI + OUT_REPORT",
         type=["txt"],
         accept_multiple_files=True,
-        key="boa_batch_txt"
+        key="boa_batch_txt",
     )
 
     out_by_prefix = {}
     if uploaded_txt:
         for f in uploaded_txt:
-            content = f.read().decode('utf-8', errors='replace')
+            content = f.read().decode("utf-8", errors="replace")
             base = f.name
             prefix = extract_filename_prefix(base)
             out_by_prefix.setdefault(prefix, {})
-            if 'OUT_SVI' in base.upper():
-                out_by_prefix[prefix]['SVI'] = content
-            elif 'OUT_REPORT' in base.upper():
-                out_by_prefix[prefix]['REPORT'] = content
+            if "OUT_SVI" in base.upper():
+                out_by_prefix[prefix]["SVI"] = {"content": content, "name": base}
+            elif "OUT_REPORT" in base.upper():
+                out_by_prefix[prefix]["REPORT"] = {"content": content, "name": base}
 
-    # ── Étape 2 : Call exports ──
-    st.subheader("📞 Étape 2 : Déposer les fichiers d'appels GoMobile")
-    uploaded_calls = st.file_uploader(
-        "Glisser-déposer TOUS les call exports (CSV/Excel)",
-        type=["csv", "xlsx", "xls"],
-        accept_multiple_files=True,
-        key="boa_batch_calls"
-    )
+    if not out_by_prefix:
+        st.info("Déposez les fichiers OUT_SVI et OUT_REPORT de chaque campagne (ex. 5 campagnes = 10 fichiers).")
+        return
 
-    call_by_prefix = {}
-    if uploaded_calls:
-        for f in uploaded_calls:
+    # Date de référence (depuis OUT_REPORT non vides)
+    reference_date_compact = None
+    for prefix, files in out_by_prefix.items():
+        if "REPORT" in files:
             try:
-                out_prefix = infer_out_prefix_from_call_filename(f.name)
-                call_by_prefix[out_prefix] = load_call_records(f)
-            except Exception as e:
-                st.error(f"❌ Erreur lecture {f.name} : {e}")
+                rows = parse_out_report(files["REPORT"]["content"])
+                if rows:
+                    reference_date_compact = rows[0]["dateGeneration"].replace(".", "")
+                    break
+            except Exception:
+                pass
+    if reference_date_compact is None:
+        reference_date_compact = datetime.now().strftime("%Y%m%d")
 
     # Campagnes prêtes (SVI + REPORT présents)
-    ready = []
+    base_ready = []
     for prefix, files in out_by_prefix.items():
-        if 'SVI' in files and 'REPORT' in files:
-            ready.append({
-                'prefix': prefix,
-                'svi_content': files['SVI'],
-                'report_content': files['REPORT'],
-                'calls': call_by_prefix.get(prefix, []),
-            })
+        if "SVI" in files and "REPORT" in files:
+            report_rows = []
+            try:
+                report_rows = parse_out_report(files["REPORT"]["content"])
+            except Exception:
+                pass
+            date_compact = (
+                report_rows[0]["dateGeneration"].replace(".", "")
+                if report_rows
+                else reference_date_compact
+            )
+            campaign_name = _campaign_name_from_prefix(prefix, date_compact)
+            base_ready.append(
+                {
+                    "prefix": prefix,
+                    "svi_content": files["SVI"]["content"],
+                    "report_content": files["REPORT"]["content"],
+                    "date_compact": date_compact,
+                    "campaign_name": campaign_name,
+                    "calls": [],
+                }
+            )
         else:
             st.warning(f"⚠️ Campagne {prefix} : manque OUT_SVI ou OUT_REPORT, ignorée.")
 
-    st.caption(f"**{len(ready)}** campagne(s) appariée(s) · {sum(len(c['calls']) for c in ready)} appels chargés")
+    if not base_ready:
+        st.warning("Aucune campagne complète (paire OUT_SVI + OUT_REPORT) détectée.")
+        return
+
+    # ── Étape 2 : Source des appels ──
+    st.subheader("📞 Étape 2 : Données d'appels (Call Export)")
+    call_source = st.radio(
+        "Comment fournir les appels GoMobile ?",
+        options=["Fichiers d'appels (CSV/Excel)", "Via API GoMobile (clé API)"],
+        index=0,
+        key="boa_batch_call_source",
+        help=(
+            "Choisissez « Via API GoMobile » si vous n'avez plus accès au téléchargement "
+            "manuel des exports d'appels : l'application récupère les appels de chaque "
+            "campagne via l'API avec votre clé."
+        ),
+    )
+
+    boa_api = None
+    api_campaign_map = {}  # prefix -> campaign dict
+
+    if call_source == "Fichiers d'appels (CSV/Excel)":
+        uploaded_calls = st.file_uploader(
+            "Glisser-déposer TOUS les call exports (CSV/Excel)",
+            type=["csv", "xlsx", "xls"],
+            accept_multiple_files=True,
+            key="boa_batch_calls",
+        )
+        call_by_prefix = {}
+        if uploaded_calls:
+            for f in uploaded_calls:
+                try:
+                    out_prefix = infer_out_prefix_from_call_filename(f.name)
+                    call_by_prefix[out_prefix] = load_call_records(f)
+                except Exception as e:
+                    st.error(f"❌ Erreur lecture {f.name} : {e}")
+        for c in base_ready:
+            c["calls"] = call_by_prefix.get(c["prefix"], [])
+        st.caption(
+            f"**{len(base_ready)}** campagne(s) appariée(s) · "
+            f"{sum(len(c['calls']) for c in base_ready)} appel(s) chargé(s) depuis les fichiers."
+        )
+    else:
+        st.info(
+            "Mode API : l'application va chercher les appels de chaque campagne sur GoMobile "
+            "à partir de votre clé API (exports d'appels). Donnez uniquement les OUT_SVI/OUT_REPORT."
+        )
+
+        session_key = (st.session_state.get("gomo_api_key") or "").strip()
+        session_base = (st.session_state.get("gomo_api_base") or GOMOBILE_API_DEFAULT_BASE).strip()
+
+        use_session = False
+        if session_key:
+            use_session = st.checkbox(
+                "Utiliser la connexion GoMobile déjà établie",
+                value=True,
+                key="boa_batch_use_session_api",
+            )
+
+        api_key = session_key if use_session else ""
+        api_base = session_base if use_session else GOMOBILE_API_DEFAULT_BASE
+
+        if not use_session:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                api_key = st.text_input(
+                    "Clé API GoMobile",
+                    type="password",
+                    key="boa_batch_api_key",
+                    help="Même clé que dans l'automatisation des campagnes.",
+                ).strip()
+            with c2:
+                api_base = st.text_input(
+                    "URL API",
+                    value=GOMOBILE_API_DEFAULT_BASE,
+                    key="boa_batch_api_base",
+                ).strip() or GOMOBILE_API_DEFAULT_BASE
+
+        if api_key:
+            boa_api = GomobileAPI(api_key, api_base)
+            st.markdown("**Correspondance campagnes (vérifiez avant de lancer)**")
+            mapping_rows = []
+            for c in base_ready:
+                guessed = c["campaign_name"]
+                found = None
+                error = ""
+                try:
+                    matches = boa_api.find_campaigns_by_name(guessed)
+                    if not matches:
+                        base_name = _campaign_name_from_prefix(c["prefix"], "")
+                        candidates = boa_api.list_campaigns(search=(base_name[:80] or c["prefix"][:80]))
+                        wanted_base = normalize_key(base_name)
+                        suffix = guessed.split()[-1] if guessed.split() else ""
+                        for cand in candidates:
+                            cname = str(cand.get("name", "") or "").strip()
+                            if cname.strip().casefold() == guessed.strip().casefold():
+                                found = cand
+                                break
+                            if suffix and suffix in cname and normalize_key(cname).startswith(wanted_base[:20]):
+                                found = cand
+                        if found is None and len(candidates) == 1:
+                            found = candidates[0]
+                    else:
+                        found = matches[0]
+                except Exception as e:
+                    error = str(e)
+                if found:
+                    api_campaign_map[c["prefix"]] = found
+                mapping_rows.append(
+                    {
+                        "Préfixe OUT": c["prefix"],
+                        "Campagne recherchée": guessed,
+                        "Campagne trouvée": str(found.get("name", "—")) if found else "—",
+                        "ID": str(found.get("id", "")) if found else "",
+                        "Statut": str(found.get("status", "")) if found else ("Erreur" if error else "Introuvable"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(mapping_rows), hide_index=True, use_container_width=True)
+
+            missing = [r["Préfixe OUT"] for r in mapping_rows if r["Statut"] in ("Introuvable", "Erreur", "")]
+            if missing:
+                st.warning(
+                    "Campagnes non trouvées automatiquement : " + ", ".join(missing) + ". "
+                    "Vérifiez le nom (date DDMMYYYY) dans GoMobile ou fournissez les exports manuellement."
+                )
+        else:
+            st.warning("Renseignez votre clé API GoMobile pour récupérer les appels automatiquement.")
+
+        st.caption(f"**{len(base_ready)}** campagne(s) prêtes (appels récupérés au lancement).")
+
+    ready = base_ready
 
     # ── Étape 3 : Lancement ──
-    if st.button("🚀 Lancer la génération batch", disabled=not ready, key="boa_batch_run"):
+    can_run = bool(ready) and (
+        call_source == "Fichiers d'appels (CSV/Excel)" or boa_api is not None
+    )
+    if st.button("🚀 Lancer la génération batch", disabled=not can_run, key="boa_batch_run"):
         with st.spinner("Traitement de toutes les campagnes..."):
-            # Valider date traitement
             treatment_date_val = treatment_date.strip() if treatment_date else None
-            if treatment_date_val and not re.match(r'^\d{4}\.\d{2}\.\d{2}$', treatment_date_val):
+            if treatment_date_val and not re.match(r"^\d{4}\.\d{2}\.\d{2}$", treatment_date_val):
                 st.warning("Format date invalide, utilisation de la date du jour.")
                 treatment_date_val = None
+
+            if call_source != "Fichiers d'appels (CSV/Excel)" and boa_api is not None:
+                fetch_status = st.status("Récupération des appels via API GoMobile...", expanded=True)
+                with fetch_status:
+                    for c in ready:
+                        camp = api_campaign_map.get(c["prefix"])
+                        if not camp:
+                            st.warning(f"{c['prefix']} : campagne introuvable sur GoMobile, 0 appel.")
+                            c["calls"] = []
+                            continue
+                        camp_id = str(camp.get("id", ""))
+                        try:
+                            st.write(f"Export des appels : **{camp.get('name', c['prefix'])}** (`{camp_id}`)…")
+                            records = boa_api.fetch_calls_export_records(
+                                {"campaignId": camp_id},
+                                poll_interval=2.0,
+                                timeout=300.0,
+                            )
+                            c["calls"] = records or []
+                            st.write(f"→ **{len(c['calls'])}** appel(s) récupéré(s).")
+                        except Exception as e:
+                            c["calls"] = []
+                            st.error(f"{c['prefix']} : échec récupération appels — {e}")
+                if all(not c.get("calls") for c in ready):
+                    fetch_status.update(label="Aucun appel récupéré", state="error")
+                else:
+                    fetch_status.update(label="Appels récupérés", state="complete")
 
             zip_buffer = io.BytesIO()
             summary_rows = []
             results = []
-
-            # Date du ZIP = date des fichiers source (1er OUT_REPORT), pas la date du jour
             batch_date_compact = None
 
-            # Première passe : récupérer la date de référence depuis les OUT_REPORT non vides
-            reference_date_compact = None
-            for c in ready:
-                out_report_rows = parse_out_report(c['report_content'])
-                if out_report_rows:
-                    reference_date_compact = out_report_rows[0]['dateGeneration'].replace('.', '')
-                    break
-            
-            # Fallback : si tous les OUT_REPORT sont vides, utiliser la date du jour
-            if reference_date_compact is None:
-                reference_date_compact = datetime.now().strftime('%Y%m%d')
-
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 for c in ready:
-                    prefix = c['prefix']
-                    out_svi_records = parse_out_svi(c['svi_content'])
-                    out_report_rows = parse_out_report(c['report_content'])
-                    calls = c['calls']
+                    prefix = c["prefix"]
+                    out_svi_records = parse_out_svi(c["svi_content"])
+                    out_report_rows = parse_out_report(c["report_content"])
+                    calls = c.get("calls", [])
 
-                    # Date compacte : utiliser la date du OUT_REPORT s'il n'est pas vide, sinon la date de référence
                     if out_report_rows:
-                        date_compact = out_report_rows[0]['dateGeneration'].replace('.', '')
+                        date_compact = out_report_rows[0]["dateGeneration"].replace(".", "")
                     else:
-                        date_compact = reference_date_compact
+                        date_compact = c.get("date_compact") or reference_date_compact
 
                     if batch_date_compact is None:
                         batch_date_compact = date_compact
@@ -4735,18 +4926,19 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                         out_svi_records, calls, date_compact, prefix, date_compact,
                     )
 
-                    zf.writestr(in_report['filename'], in_report['content'].encode('utf-8'))
-                    zf.writestr(in_svi['filename'], in_svi['content'].encode('utf-8'))
+                    zf.writestr(in_report["filename"], in_report["content"].encode("utf-8"))
+                    zf.writestr(in_svi["filename"], in_svi["content"].encode("utf-8"))
 
-                    s = in_report['stats']
+                    s = in_report["stats"]
                     summary_rows.append({
-                        'Campagne': prefix,
-                        'IN_SVI lignes DTMF': in_svi['recordCount'],
-                        'Appels': s['totalCalls'],
-                        'Contacts total': s['contactsTotal'],
-                        'Décrochés': s['decroches'],
-                        'Écoutes': s['ecoutes'],
-                        'Interactions (DTMF)': s['interactions'],
+                        "Campagne": prefix,
+                        "Campagne GoMobile": c.get("campaign_name", ""),
+                        "IN_SVI lignes DTMF": in_svi["recordCount"],
+                        "Appels": s["totalCalls"],
+                        "Contacts total": s["contactsTotal"],
+                        "Décrochés": s["decroches"],
+                        "Écoutes": s["ecoutes"],
+                        "Interactions (DTMF)": s["interactions"],
                     })
                     results.append((prefix, in_report, in_svi))
 
@@ -4754,33 +4946,28 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
 
         st.success("✅ Batch terminé avec succès !")
 
-        # ── Tableau récapitulatif DTMF ──
         st.subheader("📊 Tableau récapitulatif (Campagne → lignes DTMF IN_SVI)")
-        st.dataframe(pd.DataFrame(summary_rows), width='stretch')
+        st.dataframe(pd.DataFrame(summary_rows), width="stretch")
 
-        # ── Téléchargement ZIP global ──
-        zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime('%Y%m%d')
+        zip_file_date = batch_date_compact if batch_date_compact else datetime.now().strftime("%Y%m%d")
         st.download_button(
-            "📦 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
+            "📥 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
             data=zip_buffer,
             file_name=f"BOA_IN_FILES_{zip_file_date}.zip",
             mime="application/zip",
-            key="boa_batch_zip"
+            key="boa_batch_zip",
         )
 
-        # ── Aperçus par campagne ──
-        st.subheader("👀 Aperçus par campagne")
+        st.subheader("👁 Aperçus par campagne")
         for prefix, in_report, in_svi in results:
             with st.expander(f"{prefix} — IN_SVI ({in_svi['recordCount']} lignes DTMF)"):
                 st.markdown(f"**{in_report['filename']}** (IN_REPORT)")
-                st.text(in_report['content'])
+                st.text(in_report["content"])
                 st.markdown(f"**{in_svi['filename']}** (IN_SVI)")
-                if in_svi['recordCount'] > 0:
-                    st.text(in_svi['content'])
+                if in_svi["recordCount"] > 0:
+                    st.text(in_svi["content"])
                 else:
                     st.info("Aucun contact n'a pressé de touche DTMF.")
-
-
 # ─── Streamlit App BOA Adapter ───────────────────────────────────────────────
 
 def app_boa_adapter():

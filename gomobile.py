@@ -4890,6 +4890,25 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                             )
                             c["calls"] = records or []
                             st.write(f"→ **{len(c['calls'])}** appel(s) récupéré(s).")
+                            if c["calls"]:
+                                sample = c["calls"][0] if isinstance(c["calls"][0], dict) else {}
+                                cols = list(sample.keys())[:40]
+                                with st.expander(f"Colonnes détectées — {c['prefix']}", expanded=False):
+                                    st.code("\n".join(str(x) for x in cols) or "(aucune)")
+                                    # aperçu normalisé des champs clés
+                                    st.caption("Aperçu 1er appel (champs utiles)")
+                                    preview = {
+                                        k: sample.get(k, "")
+                                        for k in [
+                                            "phone", "telephone", "tel", "to",
+                                            "call outcome", "outcome", "callOutcome",
+                                            "answered by", "answered_by", "answeredBy",
+                                            "duration (s)", "duration", "durationMs",
+                                            "dtmf", "input", "cle_contact", "id",
+                                        ]
+                                        if sample.get(k) not in (None, "")
+                                    }
+                                    st.json(preview or {"info": "aucun champ clé détecté — vérifiez les colonnes ci-dessus"})
                         except Exception as e:
                             c["calls"] = []
                             st.error(f"{c['prefix']} : échec récupération appels — {e}")

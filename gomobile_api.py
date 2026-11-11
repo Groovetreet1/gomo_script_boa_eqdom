@@ -556,6 +556,136 @@ def _parse_call_export_bytes(content: bytes) -> list[dict]:
     return df.fillna("").to_dict("records")
 
 
+
+def _pick(record: dict, *keys):
+    if not isinstance(record, dict):
+        return None
+    for k in keys:
+        v = record.get(k)
+        if v not in (None, ""):
+            return v
+    lower = {str(k).lower().strip(): v for k, v in record.items()}
+    for k in keys:
+        v = lower.get(str(k).lower().strip())
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def _find_dtmf_in_record(record: dict) -> str:
+    if not isinstance(record, dict):
+        return ""
+    dtmf_keywords = ['input', 'dtmf', 'digit', 'key', 'touche', 'saisie', 'chiffre', 'reponse']
+    for key, value in record.items():
+        k = str(key).lower().replace(' ', '').replace('_', '').replace(':', '')
+        if any(word in k for word in dtmf_keywords) and 'branch' not in k and value is not None and str(value) != '':
+            val = str(value).strip()
+            if any(ch.isdigit() for ch in val):
+                return val
+    return ""
+
+
+def _normalize_call_record(record: dict) -> dict:
+    """Aplati un enregistrement d'appel API pour matcher les champs BOA."""
+    if not isinstance(record, dict):
+        return {}
+    flat = dict(record)
+
+    for key in ("contact", "leg", "call", "details", "report", "attributes", "meta"):
+        nested = record.get(key)
+        if isinstance(nested, dict):
+            for nk, nv in nested.items():
+                if nk not in flat or flat[nk] in (None, "", []):
+                    flat[nk] = nv
+
+    if not _pick(flat, "phone", "telephone", "tel", "to", "phoneNumber", "phone_number", "destination", "callee"):
+        for cand in ("primaryPhone", "primary_phone", "contactPhone", "contact_phone", "number"):
+            if flat.get(cand):
+                flat["phone"] = flat[cand]
+                break
+        contact = record.get("contact") if isinstance(record.get("contact"), dict) else {}
+        if not flat.get("phone") and contact:
+            for cand in ("phone", "primaryPhone", "telephone", "tel"):
+                if contact.get(cand):
+                    flat["phone"] = contact[cand]
+                    break
+
+    outcome = _pick(flat, "call outcome", "call_outcome", "callOutcome", "outcome", "status", "result", "disposition")
+    if outcome and "outcome" not in flat:
+        flat["outcome"] = outcome
+    if outcome and "call outcome" not in flat:
+        flat["call outcome"] = outcome
+
+    answered = _pick(flat, "answered by", "answered_by", "answeredBy", "answeredby", "amd", "amdResult", "amd_result")
+    if answered and "answered by" not in flat:
+        flat["answered by"] = answered
+    if not _pick(flat, "answered by", "answered_by", "answeredBy", "answeredby"):
+        oc = str(outcome or "").lower()
+        reason = str(_pick(flat, "outcomeReason", "outcome_reason", "reason", "hangupCause") or "").lower()
+        if oc in ("completed", "answered", "human") or "human" in reason or "contact_hung" in reason:
+            flat["answered by"] = "human"
+        elif "voicemail" in oc or "machine" in oc or "amd" in oc or "voicemail" in reason or "machine" in reason:
+            flat["answered by"] = "machine"
+
+    dur_s = _pick(flat, "duration (s)", "duration", "duration_s", "durationSec", "duration_sec", "billSec", "callDuration")
+    dur_ms = _pick(flat, "durationMs", "duration_ms", "durationMillis")
+    if dur_ms and not dur_s:
+        try:
+            flat["duration (s)"] = float(str(dur_ms).replace(",", ".")) / 1000.0
+        except Exception:
+            pass
+    elif dur_s and "duration (s)" not in flat:
+        flat["duration (s)"] = dur_s
+
+    dtmf = _pick(flat, "input", "dtmf", "digit", "digits", "key", "touche", "saisie", "chiffre", "reponse", "dtmfInput", "dtmf_input", "userInput")
+    if dtmf and "dtmf" not in flat:
+        flat["dtmf"] = dtmf
+    if dtmf and "input" not in flat:
+        flat["input"] = dtmf
+
+    cle = _pick(flat, "cle_contact", "clecontact", "cleContact", "contactId", "contact_id", "externalId")
+    if cle and "cle_contact" not in flat:
+        flat["cle_contact"] = cle
+
+    return flat
+
+
+def _merge_call_detail(base: dict, detail: dict) -> dict:
+    if not isinstance(detail, dict):
+        return base
+    merged = dict(base)
+    dflat = _normalize_call_record(detail)
+
+    if not _find_dtmf_in_record(merged):
+        for container_key in ("timeline", "nodeRuns", "node_runs", "events", "steps", "interactions", "messages", "legs"):
+            container = detail.get(container_key)
+            if isinstance(container, list):
+                for item in container:
+                    if isinstance(item, dict):
+                        val = _find_dtmf_in_record(_normalize_call_record(item))
+                        if val:
+                            merged["input"] = val
+                            merged["dtmf"] = val
+                            break
+            if _find_dtmf_in_record(merged):
+                break
+        if not _find_dtmf_in_record(merged):
+            for k, v in list(detail.items()):
+                if isinstance(v, dict):
+                    val = _find_dtmf_in_record(_normalize_call_record(v))
+                    if val:
+                        merged["input"] = val
+                        merged["dtmf"] = val
+                        break
+
+    for src in (dflat, detail):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if k not in merged or merged[k] in (None, ""):
+                    merged[k] = v
+    return _normalize_call_record(merged)
+
+
 class GomobileAPI:
     """Petit client REST pour https://api.gomobile.ma/api."""
 
@@ -1006,17 +1136,72 @@ class GomobileAPI:
         filters: Optional[dict] = None,
         poll_interval: float = 2.0,
         timeout: float = 300.0,
-    ) -> list[dict]:
-        """Exporte les appels filtr?s et renvoie les lignes sous forme de dicts."""
-        export = self.create_calls_export(filters)
-        export_id = str(
-            _first(export, "id", "exportId", "export_id", "jobId", "job_id", default="")
-        )
-        if not export_id:
-            raise GomobileAPIError(
-                "L'API n'a pas renvoy? d'identifiant pour l'export d'appels.",
-                payload=export,
+        ) -> list[dict]:
+        """Exporte les appels filtrés et renvoie les lignes sous forme de dicts.
+
+        Stratégie : export CSV asynchrone (équivalent export manuel), puis
+        fallback sur la liste d'appels si l'export n'est pas disponible.
+        """
+        filters = {k: v for k, v in (filters or {}).items() if v not in (None, "", [])}
+        errors: list[str] = []
+
+        # 1) Export CSV
+        try:
+            export = self.create_calls_export(filters)
+            direct_id = str(
+                _first(export, "id", "exportId", "export_id", "jobId", "job_id", default="")
             )
-        content = self.download_calls_export(export_id, poll_interval, timeout)
-        return _parse_call_export_bytes(content)
+            direct_url = _first(export, "url", "downloadUrl", "downloadURL", "fileUrl", "signedUrl", default="")
+            if direct_id:
+                content = self.download_calls_export(direct_id, poll_interval, timeout)
+                rows = _parse_call_export_bytes(content)
+                if rows:
+                    return rows
+            elif direct_url:
+                try:
+                    resp = self.session.get(str(direct_url), timeout=self.timeout)
+                    if resp.status_code in (401, 403):
+                        resp = self.session.get(str(direct_url), headers=self._auth_headers(), timeout=self.timeout)
+                    resp.raise_for_status()
+                    rows = _parse_call_export_bytes(resp.content)
+                    if rows:
+                        return rows
+                except Exception as exc:
+                    errors.append(f"export direct: {exc}")
+            else:
+                rows = export if isinstance(export, list) else extract_list(export)
+                if rows and isinstance(rows[0], dict):
+                    return [_normalize_call_record(r) for r in rows]
+                errors.append("export: identifiant/URL manquant")
+        except Exception as exc:
+            errors.append(f"export: {exc}")
+
+        # 2) Fallback : liste des appels
+        try:
+            calls = self.list_calls(**filters)
+            if calls:
+                normalized = [_normalize_call_record(c) for c in calls if isinstance(c, dict)]
+                needs_detail = any(
+                    not _find_dtmf_in_record(r) and not _pick(r, "answered by", "answered_by", "answeredBy", "answeredby")
+                    for r in normalized[:10]
+                )
+                if needs_detail:
+                    enriched = []
+                    for r in normalized:
+                        cid = str(r.get("id") or r.get("callId") or r.get("call_id") or "")
+                        if cid:
+                            try:
+                                detail = extract_item(self.get(f"/calls/{cid}"))
+                                r = _merge_call_detail(r, detail)
+                            except Exception:
+                                pass
+                        enriched.append(r)
+                    normalized = enriched
+                return normalized
+        except Exception as exc:
+            errors.append(f"liste appels: {exc}")
+
+        if errors:
+            raise GomobileAPIError("Impossible de récupérer les appels — " + " | ".join(errors))
+        return []
 

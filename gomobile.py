@@ -5497,27 +5497,22 @@ def app_gomobile_api_campaigns():
         st.error("Choisissez une date de traitement.")
         return
 
-    col_flow, col_did = st.columns([2, 2])
-    with col_flow:
-        selected_flow_label = st.selectbox(
-            "Flow à exécuter",
-            options=flow_labels,
-            index=default_flow_index,
-            key="gomo_selected_flow",
+    st.info(
+        "Chaque liste utilise son propre flow : choisissez-le dans le tableau de la section 4 "
+        "(ex. ACTIVATION → flow Activation)."
+    )
+    if did_by_label:
+        selected_did_labels = st.multiselect(
+            "Numéros sortants (DID)",
+            options=list(did_by_label.keys()),
+            default=[list(did_by_label.keys())[0]],
+            key="gomo_selected_dids",
         )
-    with col_did:
-        if did_by_label:
-            selected_did_labels = st.multiselect(
-                "Numéros sortants (DID)",
-                options=list(did_by_label.keys()),
-                default=[list(did_by_label.keys())[0]],
-                key="gomo_selected_dids",
-            )
-        else:
-            selected_did_labels = []
-            st.caption(
-                "Aucun DID chargé automatiquement. Saisissez les UUID ci-dessous."
-            )
+    else:
+        selected_did_labels = []
+        st.caption(
+            "Aucun DID chargé automatiquement. Saisissez les UUID ci-dessous."
+        )
 
     with st.expander("➕ DID IDs manuels / options avancées", expanded=False):
         manual_dids_text = st.text_input(
@@ -5712,6 +5707,47 @@ def app_gomobile_api_campaigns():
         unique_files.append(item)
     source_files = unique_files
 
+    def _suggest_flow_label(audience_name: str, labels: list[str]) -> str:
+        """Propose le flow le plus proche du nom d'audience (ex: ACTIVATION)."""
+        if not labels:
+            return ""
+        target = normalize_key(audience_name)
+        target_tokens = [tok for tok in target.split() if tok]
+        if not target_tokens:
+            return labels[0]
+
+        best_label = labels[0]
+        best_score = -1
+        # Priorité aux noms canoniques BOA présents dans l'audience.
+        canonical_hits = [
+            name for name in CANONICAL_LIST_NAMES if normalize_key(name) in target
+        ]
+        for label in labels:
+            label_key = normalize_key(label)
+            score = 0
+            for canonical in canonical_hits:
+                if normalize_key(canonical) in label_key:
+                    score += 100
+            for token in target_tokens:
+                if len(token) < 3:
+                    continue
+                if token in label_key:
+                    score += 10
+            # Léger bonus aux flows Voice (usage principal campagnes).
+            flow_obj = flow_by_label.get(label, {})
+            if flow_obj.get("channelType") == "call":
+                score += 1
+            if score > best_score:
+                best_score = score
+                best_label = label
+        # Si rien ne matche vraiment, garder le 1er flow Voice si possible.
+        if best_score <= 1:
+            for label in labels:
+                if flow_by_label.get(label, {}).get("channelType") == "call":
+                    return label
+            return labels[0]
+        return best_label
+
     if not source_files:
         st.info(
             "Déposez au moins une liste, ou traitez d'abord des fichiers AVT dans "
@@ -5730,12 +5766,14 @@ def app_gomobile_api_campaigns():
             find_phone_column(info["headers"], phone_column_default)
             or (info["headers"][0] if info["headers"] else phone_column_default)
         )
+        audience_name = audience_name_for_file(info["name"], processing_date)
         editor_rows.append(
             {
                 "Inclure": True,
                 "Fichier": info["name"],
-                "Audience": audience_name_for_file(info["name"], processing_date),
+                "Audience": audience_name,
                 "Téléphone": default_phone,
+                "Flow": _suggest_flow_label(audience_name, flow_labels),
             }
         )
 
@@ -5758,12 +5796,19 @@ def app_gomobile_api_campaigns():
     phone_signature = hashlib.md5(
         str(phone_column_default or "").strip().casefold().encode("utf-8")
     ).hexdigest()[:8]
+    flows_signature = hashlib.md5(
+        "|".join(sorted(flow_labels)).encode("utf-8")
+    ).hexdigest()[:8]
     editor_key = (
-        f"gomo_lists_editor_{processing_date:%Y%m%d}_"
-        f"{phone_signature}_{files_signature}"
+        f"gomo_lists_editor_v2_{processing_date:%Y%m%d}_"
+        f"{phone_signature}_{files_signature}_{flows_signature}"
     )
 
-    st.markdown("### 4. Aperçu et noms des audiences")
+    st.markdown("### 4. Aperçu, noms et flows des audiences")
+    st.caption(
+        "Chaque liste doit utiliser son propre flow (ex. ACTIVATION → flow Activation). "
+        "Le flow est proposé automatiquement selon le nom de l'audience, vérifiez-le avant de lancer."
+    )
     edited = st.data_editor(
         pd.DataFrame(editor_rows),
         key=editor_key,
@@ -5784,6 +5829,12 @@ def app_gomobile_api_campaigns():
                 options=all_headers,
                 required=True,
             ),
+            "Flow": st.column_config.SelectboxColumn(
+                "Flow à exécuter",
+                options=flow_labels,
+                required=True,
+                help="Flow GoMobile associé à cette audience/campagne.",
+            ),
         },
     )
 
@@ -5795,6 +5846,7 @@ def app_gomobile_api_campaigns():
         info = file_infos[int(index)]
         audience_name = str(row.get("Audience", "")).strip()
         phone_column = str(row.get("Téléphone", "")).strip()
+        flow_label_selected = str(row.get("Flow", "")).strip()
         if not audience_name:
             validation_errors.append(f"{info['name']} : nom d'audience vide.")
             continue
@@ -5804,14 +5856,18 @@ def app_gomobile_api_campaigns():
                 f"Colonnes : {', '.join(info['headers']) or 'aucune'}"
             )
             continue
-        selected_rows.append((info, audience_name, phone_column))
+        selected_flow_row = flow_by_label.get(flow_label_selected)
+        if selected_flow_row is None:
+            validation_errors.append(
+                f"{info['name']} : flow « {flow_label_selected or '(vide)'} » introuvable. "
+                "Rechargez les flows et vérifiez la sélection."
+            )
+            continue
+        selected_rows.append((info, audience_name, phone_column, selected_flow_row))
 
     if validation_errors:
         for error in validation_errors:
             st.error(error)
-
-    selected_flow = flow_by_label[selected_flow_label]
-    flow_channel = str(selected_flow.get("channelType", "") or "")
 
     selected_did_ids = []
     for label in selected_did_labels:
@@ -5825,20 +5881,32 @@ def app_gomobile_api_campaigns():
         if raw and raw not in selected_did_ids:
             selected_did_ids.append(raw)
 
-    if flow_channel == "call" and not selected_did_ids:
+    voice_rows = [
+        (audience_name, flow_label(row_flow))
+        for _, audience_name, _, row_flow in selected_rows
+        if str(row_flow.get("channelType", "") or "") == "call"
+    ]
+    if voice_rows and not selected_did_ids:
+        voice_names = ", ".join(name for name, _ in voice_rows[:4])
+        if len(voice_rows) > 4:
+            voice_names += f" (+{len(voice_rows) - 4})"
         st.error(
-            "Le flow Voice sélectionné nécessite au moins un DID. "
+            "Au moins un flow Voice est sélectionné "
+            f"({voice_names}) : un DID (numéro sortant) est requis. "
             "Sélectionnez un numéro ou saisissez un DID ID."
         )
-    if flow_channel != "call" and not selected_did_ids:
+    elif selected_rows and not voice_rows and not selected_did_ids:
         st.caption(
-            "Flow non-Voice : aucun DID sélectionné. Si le flow appelle un sous-flow "
+            "Flows non-Voice : aucun DID sélectionné. Si un flow appelle un sous-flow "
             "Voice, ajoutez un DID."
         )
 
     st.markdown("### 5. Doublons existants")
     selection_signature = hashlib.md5(
-        "|".join(name for _, name, _ in selected_rows).encode("utf-8")
+        "|".join(
+            f"{name}|{flow_label(flow_obj)}"
+            for _, name, _, flow_obj in selected_rows
+        ).encode("utf-8")
     ).hexdigest()[:10]
     if st.button(
         "🔎 Vérifier les audiences et campagnes existantes",
@@ -5848,7 +5916,7 @@ def app_gomobile_api_campaigns():
     ):
         duplicate_rows = []
         with st.spinner("Recherche des doublons dans GoMobile..."):
-            for _, audience_name, _ in selected_rows:
+            for _, audience_name, _, _ in selected_rows:
                 try:
                     audiences = api.find_audiences_by_name(audience_name)
                     campaigns = api.find_campaigns_by_name(audience_name)
@@ -5899,7 +5967,7 @@ def app_gomobile_api_campaigns():
     st.markdown("### 6. Lancer")
     st.warning(
         "Cette action crée de vrais contacts, audiences et campagnes dans GoMobile. "
-        "Vérifiez les noms, le flow, les DID et la planification avant de lancer."
+        "Vérifiez les noms, le flow de chaque liste, les DID et la planification avant de lancer."
     )
     confirm = st.checkbox(
         "Je confirme la création des audiences, l'import des contacts et "
@@ -5912,7 +5980,7 @@ def app_gomobile_api_campaigns():
         not confirm
         or bool(validation_errors)
         or not selected_rows
-        or (flow_channel == "call" and not selected_did_ids)
+        or (bool(voice_rows) and not selected_did_ids)
     )
 
     if st.button(
@@ -5927,7 +5995,7 @@ def app_gomobile_api_campaigns():
         status_box = st.status("Automatisation en cours...", expanded=True)
 
         with status_box:
-            for position, (info, audience_name, phone_column) in enumerate(
+            for position, (info, audience_name, phone_column, row_flow) in enumerate(
                 selected_rows, start=1
             ):
                 progress.progress(
@@ -5937,6 +6005,7 @@ def app_gomobile_api_campaigns():
                 result = {
                     "Liste": info["name"],
                     "Audience": audience_name,
+                    "Flow": flow_label(row_flow),
                     "Audience ID": "",
                     "Lignes fichier": "",
                     "Lignes valides": "",
@@ -5957,7 +6026,10 @@ def app_gomobile_api_campaigns():
                 }
 
                 try:
-                    st.write(f"**{position}/{len(selected_rows)} — {audience_name}**")
+                    st.write(
+                        f"**{position}/{len(selected_rows)} — {audience_name}** · "
+                        f"flow : **{flow_label(row_flow)}**"
+                    )
 
                     upload_name, upload_bytes, upload_headers, prep_stats = (
                         _prepare_list_for_gomobile(
@@ -6168,7 +6240,7 @@ def app_gomobile_api_campaigns():
                                     "Créée automatiquement par BOA Marketing — "
                                     f"traitement du {processing_date:%d/%m/%Y}"
                                 ),
-                                flow=selected_flow,
+                                flow=row_flow,
                                 audience_id=audience_id,
                                 did_ids=selected_did_ids,
                                 start_at=start_at,

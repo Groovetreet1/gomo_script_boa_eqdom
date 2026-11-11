@@ -22,6 +22,7 @@ from gomobile_api import (
     GOMOBILE_API_DEFAULT_BASE,
     GOMOBILE_TIMEZONE,
     GomobileAPI,
+    GomobileAdminAPI,
     GomobileAPIError,
     audience_name_for_file,
     build_campaign_payload,
@@ -4732,21 +4733,27 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         st.warning("Aucune campagne complète (paire OUT_SVI + OUT_REPORT) détectée.")
         return
 
-    # ── Étape 2 : Source des appels ──
-    st.subheader("📞 Étape 2 : Données d'appels (Call Export)")
+    # ── Étape 2 : Source des données / génération ──
+    st.subheader("📞 Étape 2 : Données d'appels / génération BOA")
     call_source = st.radio(
-        "Comment fournir les appels GoMobile ?",
-        options=["Fichiers d'appels (CSV/Excel)", "Via API GoMobile (clé API)"],
+        "Comment générer les fichiers IN (même résultat que le dashboard) ?",
+        options=[
+            "Fichiers d'appels (CSV/Excel)",
+            "Via API GoMobile (clé API)",
+            "Via dashboard GoMobile (session admin — identique au bouton BOA)",
+        ],
         index=0,
         key="boa_batch_call_source",
         help=(
-            "Choisissez « Via API GoMobile » si vous n'avez plus accès au téléchargement "
-            "manuel des exports d'appels : l'application récupère les appels de chaque "
-            "campagne via l'API avec votre clé."
+            "Le mode 'Via dashboard GoMobile' appelle exactement la route utilisée par le bouton "
+            "« BOA: results (IN files) » pour chaque campagne (OUT_SVI + OUT_REPORT + durée audio) "
+            "et télécharge les IN_REPORT/IN_SVI retournés par le serveur dans un ZIP multi-batch."
         ),
     )
 
     boa_api = None
+    boa_admin_api = None
+    boa_org_id = ""
     api_campaign_map = {}  # prefix -> campaign dict
 
     if call_source == "Fichiers d'appels (CSV/Excel)":
@@ -4767,103 +4774,128 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         for c in base_ready:
             c["calls"] = call_by_prefix.get(c["prefix"], [])
         st.caption(
-            f"**{len(base_ready)}** campagne(s) appariée(s) · "
+            f"**{len(base_ready)}** campagne(s) appariée(s) — "
             f"{sum(len(c['calls']) for c in base_ready)} appel(s) chargé(s) depuis les fichiers."
         )
-    else:
-        st.info(
-            "Mode API : l'application va chercher les appels de chaque campagne sur GoMobile "
-            "à partir de votre clé API (exports d'appels). Donnez uniquement les OUT_SVI/OUT_REPORT."
-        )
 
+    elif call_source == "Via API GoMobile (clé API)":
+        st.info(
+            "Mode API clé : l'application récupère les appels via l'API publique (X-API-Key) "
+            "puis recalcule les IN. Utile si la route dashboard BOA n'est pas accessible."
+        )
         session_key = (st.session_state.get("gomo_api_key") or "").strip()
         session_base = (st.session_state.get("gomo_api_base") or GOMOBILE_API_DEFAULT_BASE).strip()
-
-        use_session = False
-        if session_key:
-            use_session = st.checkbox(
-                "Utiliser la connexion GoMobile déjà établie",
-                value=True,
-                key="boa_batch_use_session_api",
-            )
-
+        use_session = bool(session_key) and st.checkbox(
+            "Utiliser la connexion GoMobile déjà établie",
+            value=True, key="boa_batch_use_session_api",
+        )
         api_key = session_key if use_session else ""
         api_base = session_base if use_session else GOMOBILE_API_DEFAULT_BASE
-
         if not use_session:
             c1, c2 = st.columns([3, 1])
             with c1:
-                api_key = st.text_input(
-                    "Clé API GoMobile",
-                    type="password",
-                    key="boa_batch_api_key",
-                    help="Même clé que dans l'automatisation des campagnes.",
-                ).strip()
+                api_key = st.text_input("Clé API GoMobile", type="password", key="boa_batch_api_key").strip()
             with c2:
-                api_base = st.text_input(
-                    "URL API",
-                    value=GOMOBILE_API_DEFAULT_BASE,
-                    key="boa_batch_api_base",
-                ).strip() or GOMOBILE_API_DEFAULT_BASE
-
+                api_base = st.text_input("URL API", value=GOMOBILE_API_DEFAULT_BASE, key="boa_batch_api_base").strip()
         if api_key:
-            boa_api = GomobileAPI(api_key, api_base)
-            st.markdown("**Correspondance campagnes (vérifiez avant de lancer)**")
-            mapping_rows = []
-            for c in base_ready:
-                guessed = c["campaign_name"]
-                found = None
-                error = ""
-                try:
-                    matches = boa_api.find_campaigns_by_name(guessed)
-                    if not matches:
-                        base_name = _campaign_name_from_prefix(c["prefix"], "")
-                        candidates = boa_api.list_campaigns(search=(base_name[:80] or c["prefix"][:80]))
-                        wanted_base = normalize_key(base_name)
-                        suffix = guessed.split()[-1] if guessed.split() else ""
-                        for cand in candidates:
-                            cname = str(cand.get("name", "") or "").strip()
-                            if cname.strip().casefold() == guessed.strip().casefold():
-                                found = cand
+            try:
+                boa_api = GomobileAPI(api_key, base_url=api_base)
+                with st.spinner("Chargement des campagnes GoMobile..."):
+                    campaigns = boa_api.list_campaigns()
+                campaign_by_norm = {normalize_key(x.get("name", "")): x for x in campaigns if isinstance(x, dict)}
+                mapping_rows = []
+                for c in base_ready:
+                    prefix = c["prefix"]
+                    camp = campaign_by_norm.get(normalize_key(prefix))
+                    if not camp:
+                        for cname, cv in campaign_by_norm.items():
+                            if cname.startswith(normalize_key(prefix)):
+                                camp = cv; break
+                    if camp:
+                        c["campaign_id"] = str(camp.get("id", "")); c["campaign_name"] = str(camp.get("name", prefix))
+                        api_campaign_map[prefix] = camp
+                    mapping_rows.append({"OUT prefix": prefix, "Campagne GoMobile": c.get("campaign_name", "— non trouvée —"), "ID": c.get("campaign_id", "")})
+                st.markdown("**Correspondance campagnes (par nom/prefix)**")
+                st.dataframe(pd.DataFrame(mapping_rows), width="stretch", hide_index=True)
+                missing = [r["OUT prefix"] for r in mapping_rows if not r["ID"]]
+                if missing:
+                    st.warning("Campagnes non trouvées : " + ", ".join(missing))
+            except Exception as e:
+                st.error(f"Connexion API impossible : {e}")
+                boa_api = None
+
+    else:
+        st.warning(
+            "⚠️ Mode identique au dashboard : utilise votre session admin (cookie `wos_admin_session`) "
+            "uniquement en mémoire. Ne partagez jamais cette session. Si vous l'avez déjà exposée, révoquez-la."
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            boa_org_id = st.text_input("Organization ID", value="a09d4fcd-6975-4af8-8cc8-f662e0321b82", key="boa_admin_org_id").strip()
+        with c2:
+            boa_session_id = st.text_input("x-session-id (optionnel)", value="", key="boa_admin_session_id").strip()
+        boa_cookie = st.text_input("Cookie session admin (wos_admin_session)", type="password", key="boa_admin_cookie", placeholder="Valeur du cookie (sans 'wos_admin_session=')").strip()
+        if boa_cookie.lower().startswith("wos_admin_session="):
+            boa_cookie = boa_cookie.split("=", 1)[1].strip()
+
+        if boa_cookie and boa_org_id:
+            try:
+                boa_admin_api = GomobileAdminAPI(boa_cookie, session_id=boa_session_id)
+                campaigns = []
+                with st.spinner("Chargement des campagnes (session admin)..."):
+                    for attempt in (
+                        lambda: boa_admin_api.list_campaigns(),
+                        lambda: boa_admin_api.get(f"/admin/organizations/{boa_org_id}/campaigns"),
+                    ):
+                        try:
+                            payload = attempt()
+                            if isinstance(payload, list):
+                                campaigns = payload
+                            elif isinstance(payload, dict):
+                                campaigns = payload.get("campaigns") or payload.get("data") or payload.get("items") or payload.get("results") or []
+                            if campaigns:
                                 break
-                            if suffix and suffix in cname and normalize_key(cname).startswith(wanted_base[:20]):
-                                found = cand
-                        if found is None and len(candidates) == 1:
-                            found = candidates[0]
+                        except Exception:
+                            pass
+                campaign_by_norm = {normalize_key(x.get("name", "")): x for x in campaigns if isinstance(x, dict) and x.get("name")}
+                for c in base_ready:
+                    prefix = c["prefix"]
+                    camp = campaign_by_norm.get(normalize_key(prefix))
+                    if not camp:
+                        for cname, cv in campaign_by_norm.items():
+                            if cname.startswith(normalize_key(prefix)):
+                                camp = cv; break
+                    if camp:
+                        c["campaign_id"] = str(camp.get("id", "")); c["campaign_name"] = str(camp.get("name", prefix))
                     else:
-                        found = matches[0]
-                except Exception as e:
-                    error = str(e)
-                if found:
-                    api_campaign_map[c["prefix"]] = found
-                mapping_rows.append(
-                    {
-                        "Préfixe OUT": c["prefix"],
-                        "Campagne recherchée": guessed,
-                        "Campagne trouvée": str(found.get("name", "—")) if found else "—",
-                        "ID": str(found.get("id", "")) if found else "",
-                        "Statut": str(found.get("status", "")) if found else ("Erreur" if error else "Introuvable"),
-                    }
-                )
-            st.dataframe(pd.DataFrame(mapping_rows), hide_index=True, use_container_width=True)
+                        c.setdefault("campaign_id", ""); c.setdefault("campaign_name", prefix)
 
-            missing = [r["Préfixe OUT"] for r in mapping_rows if r["Statut"] in ("Introuvable", "Erreur", "")]
-            if missing:
-                st.warning(
-                    "Campagnes non trouvées automatiquement : " + ", ".join(missing) + ". "
-                    "Vérifiez le nom (date DDMMYYYY) dans GoMobile ou fournissez les exports manuellement."
-                )
-        else:
-            st.warning("Renseignez votre clé API GoMobile pour récupérer les appels automatiquement.")
-
-        st.caption(f"**{len(base_ready)}** campagne(s) prêtes (appels récupérés au lancement).")
-
-    ready = base_ready
+                st.markdown("**Correspondance campagnes → ID** (vérifiez/corrigez)")
+                for c in base_ready:
+                    prefix = c["prefix"]
+                    cols = st.columns([2, 3, 2])
+                    with cols[0]: st.text(prefix)
+                    with cols[1]:
+                        c["campaign_name"] = st.text_input("Nom", value=str(c.get("campaign_name", prefix)), key=f"boa_admin_cname_{prefix}", label_visibility="collapsed")
+                    with cols[2]:
+                        c["campaign_id"] = st.text_input("ID", value=str(c.get("campaign_id", "")), key=f"boa_admin_cid_{prefix}", label_visibility="collapsed", placeholder="campaignId (UUID)").strip()
+                    if c.get("campaign_id"):
+                        api_campaign_map[prefix] = {"id": c["campaign_id"], "name": c.get("campaign_name", prefix)}
+                missing_ids = [c["prefix"] for c in base_ready if not c.get("campaign_id")]
+                if missing_ids:
+                    st.warning("ID manquant pour : " + ", ".join(missing_ids))
+            except Exception as e:
+                st.error(f"Connexion session admin impossible : {e}")
+                boa_admin_api = None
 
     # ── Étape 3 : Lancement ──
-    can_run = bool(ready) and (
-        call_source == "Fichiers d'appels (CSV/Excel)" or boa_api is not None
-    )
+    if call_source == "Fichiers d'appels (CSV/Excel)":
+        can_run = bool(base_ready)
+    elif call_source == "Via API GoMobile (clé API)":
+        can_run = bool(base_ready) and boa_api is not None
+    else:
+        can_run = bool(base_ready) and boa_admin_api is not None and bool(boa_org_id) and any(c.get("campaign_id") for c in base_ready)
+
     if st.button("🚀 Lancer la génération batch", disabled=not can_run, key="boa_batch_run"):
         try:
             with st.spinner("Traitement de toutes les campagnes..."):
@@ -4872,47 +4904,25 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                     st.warning("Format date invalide, utilisation de la date du jour.")
                     treatment_date_val = None
 
-                if call_source != "Fichiers d'appels (CSV/Excel)" and boa_api is not None:
+                if call_source == "Via API GoMobile (clé API)" and boa_api is not None:
                     fetch_status = st.status("Récupération des appels via API GoMobile...", expanded=True)
                     with fetch_status:
-                        for c in ready:
+                        for c in base_ready:
                             camp = api_campaign_map.get(c["prefix"])
                             if not camp:
-                                st.warning(f"{c['prefix']} : campagne introuvable sur GoMobile, 0 appel.")
+                                st.warning(f"{c['prefix']} : campagne introuvable, 0 appel.")
                                 c["calls"] = []
                                 continue
                             camp_id = str(camp.get("id", ""))
                             try:
                                 st.write(f"Export des appels : **{camp.get('name', c['prefix'])}** (`{camp_id}`)…")
-                                records = boa_api.fetch_calls_export_records(
-                                    {"campaignId": camp_id},
-                                    poll_interval=2.0,
-                                    timeout=300.0,
-                                )
+                                records = boa_api.fetch_calls_export_records({"campaignId": camp_id}, poll_interval=2.0, timeout=300.0)
                                 c["calls"] = records or []
                                 st.write(f"→ **{len(c['calls'])}** appel(s) récupéré(s).")
-                                if c["calls"]:
-                                    sample = c["calls"][0] if isinstance(c["calls"][0], dict) else {}
-                                    cols = list(sample.keys())[:40]
-                                    with st.expander(f"Colonnes détectées — {c['prefix']}", expanded=False):
-                                        st.code("\n".join(str(x) for x in cols) or "(aucune)")
-                                        st.caption("Aperçu 1er appel (champs utiles)")
-                                        preview = {
-                                            k: sample.get(k, "")
-                                            for k in [
-                                                "phone", "telephone", "tel", "to",
-                                                "call outcome", "outcome", "callOutcome",
-                                                "answered by", "answered_by", "answeredBy",
-                                                "duration (s)", "duration", "durationMs",
-                                                "dtmf", "input", "cle_contact", "id",
-                                            ]
-                                            if sample.get(k) not in (None, "")
-                                        }
-                                        st.json(preview or {"info": "aucun champ clé détecté — vérifiez les colonnes ci-dessus"})
                             except Exception as e:
                                 c["calls"] = []
                                 st.error(f"{c['prefix']} : échec récupération appels — {e}")
-                    if all(not c.get("calls") for c in ready):
+                    if all(not c.get("calls") for c in base_ready):
                         fetch_status.update(label="Aucun appel récupéré", state="error")
                     else:
                         fetch_status.update(label="Appels récupérés", state="complete")
@@ -4923,48 +4933,93 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                 batch_date_compact = None
 
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for c in ready:
+                    for c in base_ready:
                         prefix = c["prefix"]
-                        out_svi_records = parse_out_svi(c["svi_content"])
-                        out_report_rows = parse_out_report(c["report_content"])
-                        calls = c.get("calls", [])
-
+                        out_report_rows = parse_out_report(c.get("report_content", ""))
                         if out_report_rows:
                             date_compact = out_report_rows[0]["dateGeneration"].replace(".", "")
                         else:
                             date_compact = c.get("date_compact") or reference_date_compact
-
                         if batch_date_compact is None:
                             batch_date_compact = date_compact
 
-                        in_report = generate_in_report(
-                            out_svi_records, out_report_rows, calls,
-                            audio_duration, treatment_date_val, prefix, date_compact,
-                        )
-                        in_svi = generate_in_svi(
-                            out_svi_records, calls, date_compact, prefix, date_compact,
-                        )
+                        if call_source == "Via dashboard GoMobile (session admin — identique au bouton BOA)":
+                            camp_id = str(c.get("campaign_id", "")).strip()
+                            if not boa_admin_api or not boa_org_id or not camp_id:
+                                st.warning(f"{prefix} : ignorée (session/org/campaign ID manquant).")
+                                continue
+                            st.write(f"Génération BOA dashboard : **{c.get('campaign_name', prefix)}** (`{camp_id}`)…")
+                            try:
+                                resp = boa_admin_api.generate_boa_delivery(
+                                    boa_org_id, camp_id,
+                                    c.get("svi_name") or f"{prefix}_OUT_SVI_{date_compact}.txt",
+                                    (c.get("svi_content") or "").encode("utf-8"),
+                                    c.get("report_name") or f"{prefix}_OUT_REPORT_{date_compact}.txt",
+                                    (c.get("report_content") or "").encode("utf-8"),
+                                    audio_duration,
+                                )
+                            except Exception as e:
+                                st.error(f"{prefix} : échec génération BOA dashboard — {e}")
+                                continue
+                            files = resp.get("files") or []
+                            stats = resp.get("stats") or {}
+                            in_report_item = next((f for f in files if "IN_REPORT" in str(f.get("filename", "")).upper()), files[0] if files else None)
+                            in_svi_item = next((f for f in files if "IN_SVI" in str(f.get("filename", "")).upper()), files[1] if len(files) > 1 else None)
 
+                            def _decode_file(item):
+                                if not isinstance(item, dict):
+                                    return "", ""
+                                fname = str(item.get("filename") or "")
+                                b64 = item.get("base64") or ""
+                                try:
+                                    content = base64.b64decode(b64).decode("utf-8")
+                                except Exception:
+                                    try:
+                                        content = base64.b64decode(b64).decode("latin-1")
+                                    except Exception:
+                                        content = ""
+                                return fname, content
+
+                            rep_name, rep_content = _decode_file(in_report_item)
+                            svi_name, svi_content = _decode_file(in_svi_item)
+                            if rep_name: zf.writestr(rep_name, rep_content.encode("utf-8"))
+                            if svi_name: zf.writestr(svi_name, svi_content.encode("utf-8"))
+                            in_svi_count = int(stats.get("inSviContacts", stats.get("interactions", 0)) or 0)
+                            summary_rows.append({
+                                "Campagne": prefix, "Campagne GoMobile": c.get("campaign_name", ""),
+                                "IN_SVI lignes DTMF": in_svi_count,
+                                "Appels": stats.get("totalCalls", ""), "Contacts total": stats.get("contactsTotal", ""),
+                                "Décrochés": stats.get("decroches", ""), "Écoutes": stats.get("ecoutes", ""),
+                                "Interactions (DTMF)": stats.get("interactions", ""),
+                            })
+                            results.append({
+                                "prefix": prefix,
+                                "in_report_filename": rep_name or f"{prefix}_IN_REPORT_{date_compact}.txt",
+                                "in_report_content": rep_content,
+                                "in_svi_filename": svi_name or f"{prefix}_IN_SVI_{date_compact}.txt",
+                                "in_svi_content": svi_content,
+                                "in_svi_count": in_svi_count,
+                            })
+                            st.success(f"{prefix} : OK (serveur dashboard) — {len(files)} fichier(s).")
+                            continue
+
+                        out_svi_records = parse_out_svi(c.get("svi_content", ""))
+                        calls = c.get("calls", [])
+                        in_report = generate_in_report(out_svi_records, out_report_rows, calls, audio_duration, treatment_date_val, prefix, date_compact)
+                        in_svi = generate_in_svi(out_svi_records, calls, date_compact, prefix, date_compact)
                         zf.writestr(in_report["filename"], in_report["content"].encode("utf-8"))
                         zf.writestr(in_svi["filename"], in_svi["content"].encode("utf-8"))
-
-                        s = in_report["stats"]
+                        sstats = in_report["stats"]
                         summary_rows.append({
-                            "Campagne": prefix,
-                            "Campagne GoMobile": c.get("campaign_name", ""),
-                            "IN_SVI lignes DTMF": in_svi["recordCount"],
-                            "Appels": s["totalCalls"],
-                            "Contacts total": s["contactsTotal"],
-                            "Décrochés": s["decroches"],
-                            "Écoutes": s["ecoutes"],
-                            "Interactions (DTMF)": s["interactions"],
+                            "Campagne": prefix, "Campagne GoMobile": c.get("campaign_name", ""),
+                            "IN_SVI lignes DTMF": in_svi["recordCount"], "Appels": sstats["totalCalls"],
+                            "Contacts total": sstats["contactsTotal"], "Décrochés": sstats["decroches"],
+                            "Écoutes": sstats["ecoutes"], "Interactions (DTMF)": sstats["interactions"],
                         })
                         results.append({
                             "prefix": prefix,
-                            "in_report_filename": in_report["filename"],
-                            "in_report_content": in_report["content"],
-                            "in_svi_filename": in_svi["filename"],
-                            "in_svi_content": in_svi["content"],
+                            "in_report_filename": in_report["filename"], "in_report_content": in_report["content"],
+                            "in_svi_filename": in_svi["filename"], "in_svi_content": in_svi["content"],
                             "in_svi_count": in_svi["recordCount"],
                         })
 
@@ -4973,74 +5028,52 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                 st.session_state["boa_batch_last"] = {
                     "zip_bytes": zip_buffer.getvalue(),
                     "zip_name": f"BOA_IN_FILES_{zip_file_date}.zip",
-                    "summary_rows": summary_rows,
-                    "results": results,
+                    "summary_rows": summary_rows, "results": results,
                 }
                 st.session_state.pop("boa_batch_error", None)
         except Exception as exc:
             import traceback
-            st.session_state["boa_batch_error"] = f"{exc}"
+            st.session_state["boa_batch_error"] = str(exc)
             st.session_state["boa_batch_traceback"] = traceback.format_exc()
             st.error(f"Erreur pendant la génération : {exc}")
             with st.expander("Détails techniques", expanded=False):
                 st.code(traceback.format_exc())
 
-    # Affichage des résultats (persistant pour permettre le téléchargement)
     last = st.session_state.get("boa_batch_last")
     if last:
         st.success("✅ Batch prêt — fichiers IN générés.")
         st.subheader("📊 Tableau récapitulatif (Campagne → lignes DTMF IN_SVI)")
         st.dataframe(pd.DataFrame(last.get("summary_rows", [])), width="stretch")
-
         st.download_button(
             "📥 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
-            data=last.get("zip_bytes", b""),
-            file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
-            mime="application/zip",
-            key="boa_batch_zip",
+            data=last.get("zip_bytes", b""), file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
+            mime="application/zip", key="boa_batch_zip",
         )
-        # Lien de secours (data URI) si le bouton Streamlit échoue sur Render
         try:
-            import base64
             _zip_b64 = base64.b64encode(last.get("zip_bytes", b"")).decode("ascii")
             _zip_name = last.get("zip_name", "BOA_IN_FILES.zip")
             st.markdown(
                 f'<a download="{_zip_name}" href="data:application/zip;base64,{_zip_b64}" '
                 'style="display:inline-block;padding:0.5rem 1rem;background:#2563eb;color:white;'
-                'border-radius:0.5rem;text-decoration:none;font-weight:600;">'
-                "⬇️ Télécharger le ZIP (lien direct)</a>",
+                'border-radius:0.5rem;text-decoration:none;font-weight:600;">⬇️ Télécharger le ZIP (lien direct)</a>',
                 unsafe_allow_html=True,
             )
             st.caption("Si le bouton ci-dessus ne télécharge pas, utilise ce lien direct (même fichier).")
         except Exception:
             pass
-
         st.subheader("👁 Aperçus par campagne")
         for item in last.get("results", []):
-            prefix = item.get("prefix", "")
-            count = item.get("in_svi_count", 0)
+            prefix = item.get("prefix", ""); count = item.get("in_svi_count", 0)
             with st.expander(f"{prefix} — IN_SVI ({count} lignes DTMF)"):
                 st.markdown(f"**{item.get('in_report_filename','')}** (IN_REPORT)")
                 st.text(item.get("in_report_content", ""))
-                st.download_button(
-                    f"⬇️ {item.get('in_report_filename','IN_REPORT.txt')}",
-                    data=str(item.get("in_report_content", "")).encode("utf-8"),
-                    file_name=item.get("in_report_filename", "IN_REPORT.txt"),
-                    mime="text/plain",
-                    key=f"boa_dl_report_{prefix}",
-                )
+                st.download_button(f"⬇️ {item.get('in_report_filename','IN_REPORT.txt')}", data=str(item.get('in_report_content','')).encode('utf-8'), file_name=item.get('in_report_filename','IN_REPORT.txt'), mime='text/plain', key=f"boa_dl_report_{prefix}")
                 st.markdown(f"**{item.get('in_svi_filename','')}** (IN_SVI)")
                 if count > 0:
                     st.text(item.get("in_svi_content", ""))
                 else:
                     st.info("Aucun contact n'a pressé de touche DTMF.")
-                st.download_button(
-                    f"⬇️ {item.get('in_svi_filename','IN_SVI.txt')}",
-                    data=str(item.get("in_svi_content", "")).encode("utf-8"),
-                    file_name=item.get("in_svi_filename", "IN_SVI.txt"),
-                    mime="text/plain",
-                    key=f"boa_dl_svi_{prefix}",
-                )
+                st.download_button(f"⬇️ {item.get('in_svi_filename','IN_SVI.txt')}", data=str(item.get('in_svi_content','')).encode('utf-8'), file_name=item.get('in_svi_filename','IN_SVI.txt'), mime='text/plain', key=f"boa_dl_svi_{prefix}")
 
 
 def app_boa_adapter():

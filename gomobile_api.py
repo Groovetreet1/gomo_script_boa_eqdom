@@ -1042,6 +1042,61 @@ class GomobileAPI:
     def activate_campaign(self, campaign_id: str) -> dict:
         return extract_item(self.post(f"/campaigns/{campaign_id}/activate"))
 
+    def generate_boa_delivery(
+        self,
+        organization_id: str,
+        campaign_id: str,
+        out_svi_filename: str,
+        out_svi_bytes: bytes,
+        out_report_filename: str,
+        out_report_bytes: bytes,
+        audio_duration_seconds: float,
+    ) -> dict:
+        """Génère les IN_REPORT/IN_SVI comme le dashboard BOA GoMobile.
+
+        Appelle la route `client-deliveries/boa` utilisée par le bouton
+        « BOA: results (IN files) », avec les mêmes champs multipart.
+        La réponse contient `files` (nom + Base64) et `stats`.
+        """
+        org = str(organization_id or "").strip()
+        campaign = str(campaign_id or "").strip()
+        if not org or not campaign:
+            raise GomobileAPIError("Organization ID et Campaign ID sont requis.")
+        response = self.post(
+            f"/admin/organizations/{org}/campaigns/{campaign}/client-deliveries/boa",
+            files={
+                "outSvi": (
+                    out_svi_filename or "OUT_SVI.txt",
+                    out_svi_bytes,
+                    "text/plain",
+                ),
+                "outReport": (
+                    out_report_filename or "OUT_REPORT.txt",
+                    out_report_bytes,
+                    "text/plain",
+                ),
+            },
+            data={"audioDurationSeconds": str(audio_duration_seconds)},
+            timeout=300,
+        )
+        if not isinstance(response, dict):
+            raise GomobileAPIError(
+                "Réponse BOA inattendue : aucun objet JSON.",
+                payload=response,
+            )
+        files = response.get("files")
+        if not isinstance(files, list):
+            # Certaines réponses peuvent envelopper dans data/result.
+            for key in ("data", "result"):
+                nested = response.get(key)
+                if isinstance(nested, dict) and isinstance(nested.get("files"), list):
+                    return nested
+            raise GomobileAPIError(
+                "La route BOA n'a renvoyé aucun fichier IN.",
+                payload=response,
+            )
+        return response
+
     def get_campaign(self, campaign_id: str) -> dict:
         return extract_item(self.get(f"/campaigns/{campaign_id}"))
 
@@ -1205,3 +1260,30 @@ class GomobileAPI:
             raise GomobileAPIError("Impossible de récupérer les appels — " + " | ".join(errors))
         return []
 
+
+
+
+class GomobileAdminAPI(GomobileAPI):
+    """Client de session admin pour la génération BOA du dashboard.
+
+    La session est conservée uniquement dans l'objet Requests en mémoire.
+    """
+
+    def __init__(
+        self,
+        session_cookie: str,
+        session_id: str = "",
+        base_url: str = "https://admin.gomobile.ma/api",
+        timeout: int = 60,
+    ):
+        cookie = str(session_cookie or "").strip()
+        if not cookie:
+            raise GomobileAPIError("Session admin GoMobile vide.")
+        super().__init__("admin-session", base_url=base_url, timeout=timeout)
+        self.session.headers.pop("X-API-Key", None)
+        self.session.headers["Cookie"] = f"wos_admin_session={cookie}"
+        sid = str(session_id or "").strip()
+        if sid:
+            self.session.headers["x-session-id"] = sid
+        self.session.headers["Origin"] = "https://admin.gomobile.ma"
+        self.session.headers["Referer"] = "https://admin.gomobile.ma/"

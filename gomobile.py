@@ -4909,25 +4909,39 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                     want_prefix = _norm_name(prefix)
                     want_dates = _date_tokens(expected_name) | _date_tokens(c_row)
 
+                    def base_match(cname):
+                        cbase = _norm_name(cname)
+                        if not cbase:
+                            return False
+                        return (
+                            cbase == want_base or cbase == want_prefix
+                            or want_base.startswith(cbase) or cbase.startswith(want_base)
+                            or want_prefix.startswith(cbase) or cbase.startswith(want_prefix)
+                        )
+
                     # 1) nom exact (incluant la date)
                     for camp in campaign_items:
                         if normalize_key(camp.get("name", "")) == want_exact:
                             return camp
 
-                    # 2) même base + même date (évite de prendre 12112026 au lieu de 11112026)
+                    # 2) même base + même date (évite 12112026 au lieu de 11112026)
                     if want_dates:
                         for camp in campaign_items:
                             cname = str(camp.get("name", ""))
-                            cbase = _norm_name(cname)
-                            cdates = _date_tokens(cname)
-                            if cbase and (cbase == want_base or cbase == want_prefix or want_base.startswith(cbase) or cbase.startswith(want_base)):
-                                if cdates & want_dates:
-                                    return camp
+                            if base_match(cname) and (_date_tokens(cname) & want_dates):
+                                return camp
+                        # Date connue mais aucune campagne de cette date trouvée:
+                        # ne pas prendre une autre date (ex. 12112026) par erreur.
+                        # Fallback seulement si une campagne de même base n'a pas de date détectable.
+                        for camp in campaign_items:
+                            cname = str(camp.get("name", ""))
+                            if base_match(cname) and not _date_tokens(cname):
+                                return camp
+                        return None
 
-                    # 3) même base sans contrainte de date
+                    # 3) pas de date connue -> même base
                     for camp in campaign_items:
-                        cbase = _norm_name(camp.get("name", ""))
-                        if cbase and (cbase == want_base or cbase == want_prefix or want_base.startswith(cbase) or cbase.startswith(want_base) or want_prefix.startswith(cbase) or cbase.startswith(want_prefix)):
+                        if base_match(camp.get("name", "")):
                             return camp
 
                     # 4) préfixe normalisé

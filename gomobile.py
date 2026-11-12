@@ -5042,63 +5042,68 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
 
                         if call_source == "Via dashboard GoMobile (session admin — identique au bouton BOA)":
                             camp_id = str(c.get("campaign_id", "")).strip()
-                            if not boa_admin_api or not boa_org_id or not camp_id:
-                                st.warning(f"{prefix} : ignorée (session/org/campaign ID manquant).")
-                                continue
-                            st.write(f"Génération BOA dashboard : **{c.get('campaign_name', prefix)}** (`{camp_id}`)…")
-                            try:
-                                resp = boa_admin_api.generate_boa_delivery(
-                                    boa_org_id, camp_id,
-                                    c.get("svi_name") or f"{prefix}_OUT_SVI_{date_compact}.txt",
-                                    (c.get("svi_content") or "").encode("utf-8"),
-                                    c.get("report_name") or f"{prefix}_OUT_REPORT_{date_compact}.txt",
-                                    (c.get("report_content") or "").encode("utf-8"),
-                                    audio_duration,
-                                )
-                            except Exception as e:
-                                st.error(f"{prefix} : échec génération BOA dashboard — {e}")
-                                continue
-                            files = resp.get("files") or []
-                            stats = resp.get("stats") or {}
-                            in_report_item = next((f for f in files if "IN_REPORT" in str(f.get("filename", "")).upper()), files[0] if files else None)
-                            in_svi_item = next((f for f in files if "IN_SVI" in str(f.get("filename", "")).upper()), files[1] if len(files) > 1 else None)
-
-                            def _decode_file(item):
-                                if not isinstance(item, dict):
-                                    return "", ""
-                                fname = str(item.get("filename") or "")
-                                b64 = item.get("base64") or ""
+                            handled_dashboard = False
+                            if boa_admin_api and boa_org_id and camp_id:
+                                st.write(f"Génération BOA dashboard : **{c.get('campaign_name', prefix)}** (`{camp_id}`)…")
                                 try:
-                                    content = base64.b64decode(b64).decode("utf-8")
-                                except Exception:
-                                    try:
-                                        content = base64.b64decode(b64).decode("latin-1")
-                                    except Exception:
-                                        content = ""
-                                return fname, content
+                                    resp = boa_admin_api.generate_boa_delivery(
+                                        boa_org_id, camp_id,
+                                        c.get("svi_name") or f"{prefix}_OUT_SVI_{date_compact}.txt",
+                                        (c.get("svi_content") or "").encode("utf-8"),
+                                        c.get("report_name") or f"{prefix}_OUT_REPORT_{date_compact}.txt",
+                                        (c.get("report_content") or "").encode("utf-8"),
+                                        audio_duration,
+                                    )
+                                    files = resp.get("files") or []
+                                    stats = resp.get("stats") or {}
+                                    in_report_item = next((f for f in files if "IN_REPORT" in str(f.get("filename", "")).upper()), files[0] if files else None)
+                                    in_svi_item = next((f for f in files if "IN_SVI" in str(f.get("filename", "")).upper()), files[1] if len(files) > 1 else None)
 
-                            rep_name, rep_content = _decode_file(in_report_item)
-                            svi_name, svi_content = _decode_file(in_svi_item)
-                            if rep_name: zf.writestr(rep_name, rep_content.encode("utf-8"))
-                            if svi_name: zf.writestr(svi_name, svi_content.encode("utf-8"))
-                            in_svi_count = int(stats.get("inSviContacts", stats.get("interactions", 0)) or 0)
-                            summary_rows.append({
-                                "Campagne": prefix, "Campagne GoMobile": c.get("campaign_name", ""),
-                                "IN_SVI lignes DTMF": in_svi_count,
-                                "Appels": stats.get("totalCalls", ""), "Contacts total": stats.get("contactsTotal", ""),
-                                "Décrochés": stats.get("decroches", ""), "Écoutes": stats.get("ecoutes", ""),
-                                "Interactions (DTMF)": stats.get("interactions", ""),
-                            })
-                            results.append({
-                                "prefix": prefix,
-                                "in_report_filename": rep_name or f"{prefix}_IN_REPORT_{date_compact}.txt",
-                                "in_report_content": rep_content,
-                                "in_svi_filename": svi_name or f"{prefix}_IN_SVI_{date_compact}.txt",
-                                "in_svi_content": svi_content,
-                                "in_svi_count": in_svi_count,
-                            })
-                            st.success(f"{prefix} : OK (serveur dashboard) — {len(files)} fichier(s).")
-                            continue
+                                    def _decode_file(item):
+                                        if not isinstance(item, dict):
+                                            return "", ""
+                                        fname = str(item.get("filename") or "")
+                                        b64 = item.get("base64") or ""
+                                        try:
+                                            content = base64.b64decode(b64).decode("utf-8")
+                                        except Exception:
+                                            try:
+                                                content = base64.b64decode(b64).decode("latin-1")
+                                            except Exception:
+                                                content = ""
+                                        return fname, content
+
+                                    rep_name, rep_content = _decode_file(in_report_item)
+                                    svi_name, svi_content = _decode_file(in_svi_item)
+                                    if rep_name: zf.writestr(rep_name, rep_content.encode("utf-8"))
+                                    if svi_name: zf.writestr(svi_name, svi_content.encode("utf-8"))
+                                    in_svi_count = int(stats.get("inSviContacts", stats.get("interactions", 0)) or 0)
+                                    summary_rows.append({
+                                        "Campagne": prefix, "Campagne GoMobile": c.get("campaign_name", ""),
+                                        "IN_SVI lignes DTMF": in_svi_count,
+                                        "Appels": stats.get("totalCalls", ""), "Contacts total": stats.get("contactsTotal", ""),
+                                        "Décrochés": stats.get("decroches", ""), "Écoutes": stats.get("ecoutes", ""),
+                                        "Interactions (DTMF)": stats.get("interactions", ""),
+                                        "Source": "dashboard",
+                                    })
+                                    results.append({
+                                        "prefix": prefix,
+                                        "in_report_filename": rep_name or f"{prefix}_IN_REPORT_{date_compact}.txt",
+                                        "in_report_content": rep_content,
+                                        "in_svi_filename": svi_name or f"{prefix}_IN_SVI_{date_compact}.txt",
+                                        "in_svi_content": svi_content,
+                                        "in_svi_count": in_svi_count,
+                                    })
+                                    st.success(f"{prefix} : OK (serveur dashboard) — {len(files)} fichier(s).")
+                                    handled_dashboard = True
+                                except Exception as e:
+                                    st.warning(f"{prefix} : génération dashboard indisponible ({e}) — génération locale (peut être vide).")
+                            else:
+                                st.info(f"{prefix} : ID campagne absent/non trouvé sur la plateforme — génération locale (peut être vide).")
+
+                            if handled_dashboard:
+                                continue
+
 
                         out_svi_records = parse_out_svi(c.get("svi_content", ""))
                         calls = c.get("calls", [])

@@ -5102,40 +5102,92 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         st.subheader("📊 Tableau récapitulatif (Campagne → lignes DTMF IN_SVI)")
         st.dataframe(pd.DataFrame(last.get("summary_rows", [])), width="stretch")
 
-        # Lien direct en premier (plus fiable que le bouton Streamlit sur certains navigateurs/Render)
+        _zip_bytes = last.get("zip_bytes", b"") or b""
+        _zip_name = last.get("zip_name", "BOA_IN_FILES.zip")
+
+        # Téléchargement direct (Blob) — souvent plus fiable que data: URI
         try:
-            _zip_bytes = last.get("zip_bytes", b"") or b""
+            import streamlit.components.v1 as components
             _zip_b64 = base64.b64encode(_zip_bytes).decode("ascii")
-            _zip_name = last.get("zip_name", "BOA_IN_FILES.zip")
-            st.markdown(
-                f'<a download="{_zip_name}" href="data:application/zip;base64,{_zip_b64}" '
-                'style="display:inline-block;margin:0.25rem 0;padding:0.6rem 1rem;background:#16a34a;color:white;'
-                'border-radius:0.5rem;text-decoration:none;font-weight:700;font-size:1rem;">'
-                f"⬇️ Télécharger le ZIP (lien direct) — {_zip_name}</a>",
-                unsafe_allow_html=True,
+            components.html(
+                f"""
+                <div style="margin:6px 0 10px 0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
+                  <a id="dlzip" href="#" download="{_zip_name}"
+                     style="display:inline-block;padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;
+                            text-decoration:none;font-weight:700;font-size:15px;">
+                    ⬇️ Télécharger le ZIP (lien direct) — {_zip_name}
+                  </a>
+                  <div style="color:#374151;font-size:12px;margin-top:6px;">
+                    Taille: {len(_zip_bytes)} octets. Si le téléchargement ne démarre pas, utilisez le bouton ci-dessous ou les fichiers individuels.
+                  </div>
+                </div>
+                <script>
+                (function() {{
+                  const b64 = "{_zip_b64}";
+                  const name = "{_zip_name}";
+                  const a = document.getElementById('dlzip');
+                  function b64ToBlob(b64Data, contentType='application/zip') {{
+                    const byteChars = atob(b64Data);
+                    const sliceSize = 1024;
+                    const chunks = [];
+                    for (let offset = 0; offset < byteChars.length; offset += sliceSize) {{
+                      const slice = byteChars.slice(offset, offset + sliceSize);
+                      const byteNumbers = new Array(slice.length);
+                      for (let i = 0; i < slice.length; i++) byteNumbers[i] = slice.charCodeAt(i);
+                      chunks.push(new Uint8Array(byteNumbers));
+                    }}
+                    return new Blob(chunks, {{type: contentType}});
+                  }}
+                  try {{
+                    const blob = b64ToBlob(b64);
+                    const url = URL.createObjectURL(blob);
+                    a.href = url;
+                    a.addEventListener('click', function() {{
+                      setTimeout(function() {{ URL.revokeObjectURL(url); }}, 60000);
+                    }});
+                  }} catch (e) {{
+                    a.removeAttribute('href');
+                    a.textContent = 'Lien direct indisponible (erreur navigateur)';
+                    a.style.background = '#9ca3af';
+                  }}
+                }})();
+                </script>
+                """,
+                height=95,
             )
-            st.caption(f"Taille: {len(_zip_bytes)} octets. Cliquez sur ce lien vert si le bouton ci-dessous ne fonctionne pas.")
         except Exception as e:
             st.warning(f"Lien direct indisponible : {e}")
 
         st.download_button(
             "📥 Télécharger le ZIP (bouton Streamlit)",
-            data=last.get("zip_bytes", b""), file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
+            data=_zip_bytes, file_name=_zip_name,
             mime="application/zip", key="boa_batch_zip",
         )
+
         st.subheader("👁 Aperçus par campagne")
         for item in last.get("results", []):
-            prefix = item.get("prefix", ""); count = item.get("in_svi_count", 0)
+            prefix = item.get("prefix", "")
+            count = item.get("in_svi_count", 0)
             with st.expander(f"{prefix} — IN_SVI ({count} lignes DTMF)"):
                 st.markdown(f"**{item.get('in_report_filename','')}** (IN_REPORT)")
                 st.text(item.get("in_report_content", ""))
-                st.download_button(f"⬇️ {item.get('in_report_filename','IN_REPORT.txt')}", data=str(item.get('in_report_content','')).encode('utf-8'), file_name=item.get('in_report_filename','IN_REPORT.txt'), mime='text/plain', key=f"boa_dl_report_{prefix}")
+                st.download_button(
+                    f"⬇️ {item.get('in_report_filename','IN_REPORT.txt')}",
+                    data=str(item.get("in_report_content", "")).encode("utf-8"),
+                    file_name=item.get("in_report_filename", "IN_REPORT.txt"),
+                    mime="text/plain", key=f"boa_dl_report_{prefix}",
+                )
                 st.markdown(f"**{item.get('in_svi_filename','')}** (IN_SVI)")
                 if count > 0:
                     st.text(item.get("in_svi_content", ""))
                 else:
                     st.info("Aucun contact n'a pressé de touche DTMF.")
-                st.download_button(f"⬇️ {item.get('in_svi_filename','IN_SVI.txt')}", data=str(item.get('in_svi_content','')).encode('utf-8'), file_name=item.get('in_svi_filename','IN_SVI.txt'), mime='text/plain', key=f"boa_dl_svi_{prefix}")
+                st.download_button(
+                    f"⬇️ {item.get('in_svi_filename','IN_SVI.txt')}",
+                    data=str(item.get("in_svi_content", "")).encode("utf-8"),
+                    file_name=item.get("in_svi_filename", "IN_SVI.txt"),
+                    mime="text/plain", key=f"boa_dl_svi_{prefix}",
+                )
 
 
 def app_boa_adapter():

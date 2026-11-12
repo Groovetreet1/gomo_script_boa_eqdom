@@ -4829,12 +4829,20 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             "⚠️ Mode identique au dashboard : utilise votre session admin (cookie `wos_admin_session`) "
             "uniquement en mémoire. Ne partagez jamais cette session. Si vous l'avez déjà exposée, révoquez-la."
         )
+        st.caption(
+            "Astuce : si vous avez déjà connecté la clé API GoMobile (menu Automatisation), "
+            "les ID de campagnes seront résolus automatiquement à partir des noms des fichiers."
+        )
         c1, c2 = st.columns(2)
         with c1:
             boa_org_id = st.text_input("Organization ID", value="a09d4fcd-6975-4af8-8cc8-f662e0321b82", key="boa_admin_org_id").strip()
         with c2:
             boa_session_id = st.text_input("x-session-id (optionnel)", value="", key="boa_admin_session_id").strip()
-        boa_cookie = st.text_input("Cookie session admin (wos_admin_session)", type="password", key="boa_admin_cookie", placeholder="Valeur du cookie (sans 'wos_admin_session=')").strip()
+        boa_cookie = st.text_input(
+            "Cookie session admin (wos_admin_session)",
+            type="password", key="boa_admin_cookie",
+            placeholder="Valeur du cookie (sans 'wos_admin_session=')",
+        ).strip()
         if boa_cookie.lower().startswith("wos_admin_session="):
             boa_cookie = boa_cookie.split("=", 1)[1].strip()
 
@@ -4842,35 +4850,79 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
             try:
                 boa_admin_api = GomobileAdminAPI(boa_cookie, session_id=boa_session_id)
                 campaigns = []
-                with st.spinner("Chargement des campagnes (session admin)..."):
-                    for attempt in (
-                        lambda: boa_admin_api.list_campaigns(),
-                        lambda: boa_admin_api.get(f"/admin/organizations/{boa_org_id}/campaigns"),
-                    ):
-                        try:
-                            payload = attempt()
-                            if isinstance(payload, list):
-                                campaigns = payload
-                            elif isinstance(payload, dict):
-                                campaigns = payload.get("campaigns") or payload.get("data") or payload.get("items") or payload.get("results") or []
-                            if campaigns:
-                                break
-                        except Exception:
-                            pass
-                campaign_by_norm = {normalize_key(x.get("name", "")): x for x in campaigns if isinstance(x, dict) and x.get("name")}
-                for c in base_ready:
-                    prefix = c["prefix"]
-                    camp = campaign_by_norm.get(normalize_key(prefix))
-                    if not camp:
-                        for cname, cv in campaign_by_norm.items():
-                            if cname.startswith(normalize_key(prefix)):
-                                camp = cv; break
-                    if camp:
-                        c["campaign_id"] = str(camp.get("id", "")); c["campaign_name"] = str(camp.get("name", prefix))
-                    else:
-                        c.setdefault("campaign_id", ""); c.setdefault("campaign_name", prefix)
 
-                st.markdown("**Correspondance campagnes → ID** (vérifiez/corrigez)")
+                # 1) Priorité: lister les campagnes via la clé API déjà connectée (fiable pour récupérer les IDs)
+                session_key = (st.session_state.get("gomo_api_key") or "").strip()
+                session_base = (st.session_state.get("gomo_api_base") or GOMOBILE_API_DEFAULT_BASE).strip()
+                if session_key:
+                    try:
+                        with st.spinner("Récupération des campagnes via la connexion API existante..."):
+                            api_for_ids = GomobileAPI(session_key, base_url=session_base)
+                            campaigns = api_for_ids.list_campaigns()
+                        if campaigns:
+                            st.info("IDs de campagnes récupérés via la connexion API GoMobile existante (selon les noms des fichiers).")
+                    except Exception as e:
+                        st.caption(f"Connexion API existante indisponible pour lister les campagnes : {e}")
+
+                # 2) Fallback: tentative via session admin
+                if not campaigns:
+                    with st.spinner("Chargement des campagnes (session admin)..."):
+                        for attempt in (
+                            lambda: boa_admin_api.list_campaigns(),
+                            lambda: boa_admin_api.get(f"/admin/organizations/{boa_org_id}/campaigns"),
+                        ):
+                            try:
+                                payload = attempt()
+                                if isinstance(payload, list):
+                                    campaigns = payload
+                                elif isinstance(payload, dict):
+                                    campaigns = payload.get("campaigns") or payload.get("data") or payload.get("items") or payload.get("results") or []
+                                if campaigns:
+                                    break
+                            except Exception:
+                                pass
+                if not campaigns:
+                    st.info("Impossible de lister les campagnes automatiquement. Saisissez l'ID si nécessaire (sinon vérifiez la connexion API Automatisation).")
+
+                campaign_items = [x for x in campaigns if isinstance(x, dict) and x.get("name")]
+
+                def _norm_name(n):
+                    n = normalize_key(str(n or ""))
+                    n = re.sub(r"\b\d{6,8}\b", " ", n)  # retire suffixe date JJMMAAAA/AAAAMMJJ
+                    return re.sub(r"\s+", " ", n).strip()
+
+                def _match_campaign(c_row):
+                    prefix = str(c_row.get("prefix", ""))
+                    want_exact = normalize_key(c_row.get("campaign_name") or prefix)
+                    want_base = _norm_name(c_row.get("campaign_name") or prefix)
+                    want_prefix = _norm_name(prefix)
+                    # 1) exact (avec date)
+                    for camp in campaign_items:
+                        if normalize_key(camp.get("name", "")) == want_exact:
+                            return camp
+                    # 2) même base sans date / préfixe
+                    for camp in campaign_items:
+                        cbase = _norm_name(camp.get("name", ""))
+                        if cbase and (cbase == want_base or cbase == want_prefix or want_base.startswith(cbase) or cbase.startswith(want_base) or want_prefix.startswith(cbase) or cbase.startswith(want_prefix)):
+                            return camp
+                    # 3) préfixe normalisé
+                    np = normalize_key(prefix)
+                    for camp in campaign_items:
+                        cn = normalize_key(camp.get("name", ""))
+                        if cn.startswith(np) or np.startswith(cn):
+                            return camp
+                    return None
+
+                for c in base_ready:
+                    camp = _match_campaign(c)
+                    if camp:
+                        c["campaign_id"] = str(camp.get("id", ""))
+                        c["campaign_name"] = str(camp.get("name", c.get("campaign_name", c["prefix"])))
+                    else:
+                        c.setdefault("campaign_id", "")
+                        c.setdefault("campaign_name", c.get("campaign_name", c["prefix"]))
+
+                st.markdown("**Correspondance campagnes → ID** (auto depuis noms des fichiers ; vérifiez/corrigez si besoin)")
                 for c in base_ready:
                     prefix = c["prefix"]
                     cols = st.columns([2, 3, 2])
@@ -4881,9 +4933,14 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                         c["campaign_id"] = st.text_input("ID", value=str(c.get("campaign_id", "")), key=f"boa_admin_cid_{prefix}", label_visibility="collapsed", placeholder="campaignId (UUID)").strip()
                     if c.get("campaign_id"):
                         api_campaign_map[prefix] = {"id": c["campaign_id"], "name": c.get("campaign_name", prefix)}
+
                 missing_ids = [c["prefix"] for c in base_ready if not c.get("campaign_id")]
                 if missing_ids:
-                    st.warning("ID manquant pour : " + ", ".join(missing_ids))
+                    st.warning(
+                        "ID non résolu automatiquement pour : " + ", ".join(missing_ids)
+                        + ". Assurez-vous que les campagnes existent avec le même nom (ex. ACTIVATION JJMMAAAA) "
+                        "et que la connexion API Automatisation est active, ou saisissez l'ID manuellement."
+                    )
             except Exception as e:
                 st.error(f"Connexion session admin impossible : {e}")
                 boa_admin_api = None

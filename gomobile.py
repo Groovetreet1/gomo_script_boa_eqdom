@@ -4987,10 +4987,11 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
     # ── Étape 3 : Lancement ──
     if call_source == "Fichiers d'appels (CSV/Excel)":
         can_run = bool(base_ready)
-    elif call_source == "Via API GoMobile (clé API)":
+    elif call_source.startswith("Via API GoMobile"):
         can_run = bool(base_ready) and boa_api is not None
     else:
-        can_run = bool(base_ready) and boa_admin_api is not None and bool(boa_org_id) and any(c.get("campaign_id") for c in base_ready)
+        # Mode dashboard: génération serveur si ID campagne dispo, sinon fallback local (même sans ID/appels)
+        can_run = bool(base_ready) and (boa_admin_api is not None and bool(boa_org_id))
 
     if st.button("🚀 Lancer la génération batch", disabled=not can_run, key="boa_batch_run"):
         try:

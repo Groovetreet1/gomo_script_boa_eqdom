@@ -5,6 +5,7 @@ import zipfile
 import re
 import io
 import hashlib
+import base64
 from io import BytesIO, StringIO
 from datetime import datetime, date, time as dt_time, timedelta
 from pathlib import Path
@@ -4891,21 +4892,45 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
                     n = re.sub(r"\b\d{6,8}\b", " ", n)  # retire suffixe date JJMMAAAA/AAAAMMJJ
                     return re.sub(r"\s+", " ", n).strip()
 
+                def _date_tokens(name_or_row):
+                    # Extrait tokens date possibles (DDMMYYYY depuis nom campagne, YYYYMMDD depuis fichiers)
+                    tokens = set(re.findall(r"\b\d{8}\b", str(name_or_row or "")))
+                    dc = str((name_or_row.get("date_compact") if isinstance(name_or_row, dict) else "") or "")
+                    if re.fullmatch(r"\d{8}", dc):
+                        tokens.add(dc)
+                        tokens.add(dc[6:8] + dc[4:6] + dc[0:4])  # YYYYMMDD -> DDMMYYYY
+                    return tokens
+
                 def _match_campaign(c_row):
                     prefix = str(c_row.get("prefix", ""))
-                    want_exact = normalize_key(c_row.get("campaign_name") or prefix)
-                    want_base = _norm_name(c_row.get("campaign_name") or prefix)
+                    expected_name = str(c_row.get("campaign_name") or prefix)
+                    want_exact = normalize_key(expected_name)
+                    want_base = _norm_name(expected_name)
                     want_prefix = _norm_name(prefix)
-                    # 1) exact (avec date)
+                    want_dates = _date_tokens(expected_name) | _date_tokens(c_row)
+
+                    # 1) nom exact (incluant la date)
                     for camp in campaign_items:
                         if normalize_key(camp.get("name", "")) == want_exact:
                             return camp
-                    # 2) même base sans date / préfixe
+
+                    # 2) même base + même date (évite de prendre 12112026 au lieu de 11112026)
+                    if want_dates:
+                        for camp in campaign_items:
+                            cname = str(camp.get("name", ""))
+                            cbase = _norm_name(cname)
+                            cdates = _date_tokens(cname)
+                            if cbase and (cbase == want_base or cbase == want_prefix or want_base.startswith(cbase) or cbase.startswith(want_base)):
+                                if cdates & want_dates:
+                                    return camp
+
+                    # 3) même base sans contrainte de date
                     for camp in campaign_items:
                         cbase = _norm_name(camp.get("name", ""))
                         if cbase and (cbase == want_base or cbase == want_prefix or want_base.startswith(cbase) or cbase.startswith(want_base) or want_prefix.startswith(cbase) or cbase.startswith(want_prefix)):
                             return camp
-                    # 3) préfixe normalisé
+
+                    # 4) préfixe normalisé
                     np = normalize_key(prefix)
                     for camp in campaign_items:
                         cn = normalize_key(camp.get("name", ""))

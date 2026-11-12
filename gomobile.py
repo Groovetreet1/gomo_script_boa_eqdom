@@ -5044,23 +5044,28 @@ def app_boa_adapter_batch(audio_duration, treatment_date):
         st.success("✅ Batch prêt — fichiers IN générés.")
         st.subheader("📊 Tableau récapitulatif (Campagne → lignes DTMF IN_SVI)")
         st.dataframe(pd.DataFrame(last.get("summary_rows", [])), width="stretch")
-        st.download_button(
-            "📥 Télécharger le ZIP (tous les IN_REPORT + IN_SVI)",
-            data=last.get("zip_bytes", b""), file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
-            mime="application/zip", key="boa_batch_zip",
-        )
+
+        # Lien direct en premier (plus fiable que le bouton Streamlit sur certains navigateurs/Render)
         try:
-            _zip_b64 = base64.b64encode(last.get("zip_bytes", b"")).decode("ascii")
+            _zip_bytes = last.get("zip_bytes", b"") or b""
+            _zip_b64 = base64.b64encode(_zip_bytes).decode("ascii")
             _zip_name = last.get("zip_name", "BOA_IN_FILES.zip")
             st.markdown(
                 f'<a download="{_zip_name}" href="data:application/zip;base64,{_zip_b64}" '
-                'style="display:inline-block;padding:0.5rem 1rem;background:#2563eb;color:white;'
-                'border-radius:0.5rem;text-decoration:none;font-weight:600;">⬇️ Télécharger le ZIP (lien direct)</a>',
+                'style="display:inline-block;margin:0.25rem 0;padding:0.6rem 1rem;background:#16a34a;color:white;'
+                'border-radius:0.5rem;text-decoration:none;font-weight:700;font-size:1rem;">'
+                f"⬇️ Télécharger le ZIP (lien direct) — {_zip_name}</a>",
                 unsafe_allow_html=True,
             )
-            st.caption("Si le bouton ci-dessus ne télécharge pas, utilise ce lien direct (même fichier).")
-        except Exception:
-            pass
+            st.caption(f"Taille: {len(_zip_bytes)} octets. Cliquez sur ce lien vert si le bouton ci-dessous ne fonctionne pas.")
+        except Exception as e:
+            st.warning(f"Lien direct indisponible : {e}")
+
+        st.download_button(
+            "📥 Télécharger le ZIP (bouton Streamlit)",
+            data=last.get("zip_bytes", b""), file_name=last.get("zip_name", "BOA_IN_FILES.zip"),
+            mime="application/zip", key="boa_batch_zip",
+        )
         st.subheader("👁 Aperçus par campagne")
         for item in last.get("results", []):
             prefix = item.get("prefix", ""); count = item.get("in_svi_count", 0)

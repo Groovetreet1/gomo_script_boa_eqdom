@@ -15,9 +15,9 @@ Application **Streamlit** regroupant 5 outils sous le même menu :
 L'onglet **AUTOMATISATION_CAMPAGNES** (ou **BOA_MARKETING → 🚀 Audiences & Campagnes GoMobile**) permet de :
 
 - se connecter avec une **clé API GoMobile** (`X-API-Key`) — la clé reste en mémoire de session et n'est jamais écrite sur disque ;
-- créer ou réutiliser les audiences nommées `NOM_LISTE JJMMAAAA` (date de traitement modifiable) ;
+- créer ou réutiliser les audiences nommées `NOM_LISTE JJMMAAAA` (suffixe = date des fichiers j-1, indépendant de la planification) ;
 - importer les contacts via la colonne **`TEL_GSM`** ;
-- créer et activer les campagnes portant le même nom que l'audience, avec 3 tentatives le jour du traitement : **10:00**, **14:00** et **16:30**.
+- créer et activer les campagnes portant le même nom que l'audience, avec 3 tentatives le jour de planification (jour de création par défaut, modifiable) : **10:00**, **14:00** et **16:30**.
 
 Les relances T2/T3 ne sont planifiées que pour les flows **Voice**. Les listes traitées dans l'onglet **BOA_MARKETING** sont directement réutilisables dans l'onglet d'automatisation.
 

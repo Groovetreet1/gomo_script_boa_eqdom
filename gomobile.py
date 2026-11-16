@@ -5917,11 +5917,16 @@ def app_gomobile_api_campaigns():
     st.markdown("### 1. Paramètres de la campagne")
     col_date, col_t1, col_t2, col_t3 = st.columns(4)
     with col_date:
-        processing_date = st.date_input(
-            "Date de traitement (suffixe audience)",
+        schedule_date = st.date_input(
+            "Date de planification (jour de création)",
             value=datetime.now(GOMOBILE_TIMEZONE).date(),
             format="DD/MM/YYYY",
-            key="gomo_processing_date",
+            key="gomo_schedule_date",
+            help=(
+                "Date des tentatives T1/T2/T3 (startAt/stopAt). "
+                "Le suffixe des noms audience/campagne reste basé sur la date "
+                "des fichiers (j-1)."
+            ),
         )
     with col_t1:
         first_time = st.time_input(
@@ -5945,8 +5950,8 @@ def app_gomobile_api_campaigns():
             key="gomo_t3",
         )
 
-    if not isinstance(processing_date, date):
-        st.error("Choisissez une date de traitement.")
+    if not isinstance(schedule_date, date):
+        st.error("Choisissez une date de planification.")
         return
 
     st.info(
@@ -6108,7 +6113,7 @@ def app_gomobile_api_campaigns():
     source_files = unique_files
 
     # ------------------------------------------------------------------
-    # Date de traitement : détection automatique depuis les noms de fichiers
+    # Date des fichiers (suffixe j-1) : détection automatique
     # ------------------------------------------------------------------
     def _detect_date_from_filenames(files: list[dict]) -> date | None:
         """Détecte une date DDMMYYYY ou YYYYMMDD dans les noms de fichiers."""
@@ -6132,31 +6137,52 @@ def app_gomobile_api_campaigns():
 
     detected_file_date = _detect_date_from_filenames(source_files)
 
-    if detected_file_date and detected_file_date != processing_date:
-        use_file_date = st.checkbox(
-            f"Utiliser la date des fichiers : {detected_file_date:%d/%m/%Y} "
-            f"(au lieu de {processing_date:%d/%m/%Y})",
-            value=True,
-            key=f"gomo_use_file_date_{detected_file_date:%Y%m%d}",
+    # ------------------------------------------------------------------
+    # Deux dates distinctes :
+    #   - name_date     : suffixe des noms audience/campagne (date des fichiers j-1)
+    #   - schedule_date : planification T1/T2/T3 (jour de création ou date choisie)
+    # ------------------------------------------------------------------
+    default_name_date = detected_file_date or (schedule_date - timedelta(days=1))
+    col_name_date, col_name_info = st.columns([1, 2])
+    with col_name_date:
+        name_date = st.date_input(
+            "Date du suffixe des noms (j-1)",
+            value=default_name_date,
+            format="DD/MM/YYYY",
+            key=(
+                f"gomo_name_date_{detected_file_date:%Y%m%d}"
+                if detected_file_date
+                else "gomo_name_date_sans_fichier"
+            ),
             help=(
-                "Le suffixe des audiences/campagnes et la planification seront basés "
-                "sur la date détectée dans les noms des fichiers déposés."
+                "Date utilisée dans les noms des audiences et des campagnes "
+                "(NOM_LISTE JJMMAAAA). Elle reste indépendante de la date de "
+                "planification T1/T2/T3."
             ),
         )
-        if use_file_date:
-            processing_date = detected_file_date
-            st.info(
-                f"✅ Date de traitement appliquée depuis les fichiers : "
-                f"**{processing_date:%d/%m/%Y}**"
+    with col_name_info:
+        if detected_file_date:
+            st.caption(
+                f"Date détectée dans les fichiers : **{detected_file_date:%d/%m/%Y}** — "
+                "modifiable ci-contre si besoin."
             )
-    elif detected_file_date:
-        st.caption(
-            f"Date détectée dans les fichiers : **{detected_file_date:%d/%m/%Y}** "
-            "(identique à la date de traitement)."
-        )
+        else:
+            st.caption(
+                "Aucune date détectée dans les noms de fichiers : par défaut "
+                f"**{default_name_date:%d/%m/%Y}** (j-1). Modifiable ci-contre."
+            )
+
+    if not isinstance(name_date, date):
+        st.error("Choisissez la date du suffixe des noms.")
+        return
+
+    st.info(
+        f"Suffixe des noms : **{name_date:%d/%m/%Y}** — "
+        f"planification : **{schedule_date:%d/%m/%Y}**."
+    )
 
     start_at, stop_at, retry_times = build_schedule(
-        processing_date,
+        schedule_date,
         first_time,
         second_time,
         third_time,
@@ -6179,7 +6205,8 @@ def app_gomobile_api_campaigns():
         schedule_lines.append("**T3** : ignorée")
     st.markdown(" — ".join(schedule_lines))
     st.caption(
-        f"Suffixe audience/campagne : **{processing_date:%d/%m/%Y}** — "
+        f"Suffixe audience/campagne : **{name_date:%d/%m/%Y}** — "
+        f"planification : **{schedule_date:%d/%m/%Y}** — "
         "heures en fuseau Africa/Casablanca. "
         "Les horaires d'appel configurés dans l'organisation restent applicables."
     )
@@ -6269,7 +6296,7 @@ def app_gomobile_api_campaigns():
             find_phone_column(info["headers"], phone_column_default)
             or (info["headers"][0] if info["headers"] else phone_column_default)
         )
-        audience_name = audience_name_for_file(info["name"], processing_date)
+        audience_name = audience_name_for_file(info["name"], name_date)
         editor_rows.append(
             {
                 "Inclure": True,
@@ -6303,7 +6330,7 @@ def app_gomobile_api_campaigns():
         "|".join(sorted(flow_labels)).encode("utf-8")
     ).hexdigest()[:8]
     editor_key = (
-        f"gomo_lists_editor_v2_{processing_date:%Y%m%d}_"
+        f"gomo_lists_editor_v2_{name_date:%Y%m%d}_"
         f"{phone_signature}_{files_signature}_{flows_signature}"
     )
 
@@ -6579,7 +6606,7 @@ def app_gomobile_api_campaigns():
                             audience_name,
                             description=(
                                 "Audience BOA Marketing — traitement du "
-                                f"{processing_date:%d/%m/%Y}"
+                                f"{name_date:%d/%m/%Y}"
                             ),
                         )
                         audience_id = str(audience.get("id", ""))
@@ -6741,7 +6768,7 @@ def app_gomobile_api_campaigns():
                                 name=audience_name,
                                 description=(
                                     "Créée automatiquement par BOA Marketing — "
-                                    f"traitement du {processing_date:%d/%m/%Y}"
+                                    f"traitement du {name_date:%d/%m/%Y}"
                                 ),
                                 flow=row_flow,
                                 audience_id=audience_id,
@@ -6808,7 +6835,8 @@ def app_gomobile_api_campaigns():
             status_box.update(label="Automatisation terminée", state="complete")
 
         st.session_state["gomo_last_results"] = {
-            "date": f"{processing_date:%d/%m/%Y}",
+            "date": f"{name_date:%d/%m/%Y}",
+            "schedule_date": f"{schedule_date:%d/%m/%Y}",
             "rows": results,
         }
 
@@ -6816,7 +6844,12 @@ def app_gomobile_api_campaigns():
     last_results = st.session_state.get("gomo_last_results")
     if last_results and last_results.get("rows"):
         st.markdown("### 📊 Résultat de la dernière exécution")
-        st.caption(f"Traitement du {last_results.get('date', '')}")
+        caption_parts = [f"Traitement du {last_results.get('date', '')}"]
+        if last_results.get("schedule_date"):
+            caption_parts.append(
+                f"planification du {last_results['schedule_date']}"
+            )
+        st.caption(" — ".join(caption_parts))
         results_df = pd.DataFrame(last_results["rows"])
         st.dataframe(results_df, hide_index=True, use_container_width=True)
         st.download_button(

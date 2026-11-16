@@ -6047,64 +6047,12 @@ def app_gomobile_api_campaigns():
         help="Utilisée si la colonne n'est pas détectée automatiquement dans un fichier.",
     )
 
-    start_at, stop_at, retry_times = build_schedule(
-        processing_date,
-        first_time,
-        second_time,
-        third_time,
-        skip_past=skip_past,
-        shift_past_retries=shift_past_retries,
-    )
     now_local = datetime.now(GOMOBILE_TIMEZONE)
-
-    st.markdown("### 2. Planification")
-    schedule_lines = [
-        f"**T1** : {start_at:%d/%m/%Y %H:%M}",
-    ]
-    if len(retry_times) >= 1:
-        schedule_lines.append(f"**T2** : {retry_times[0]:%d/%m/%Y %H:%M}")
-    else:
-        schedule_lines.append("**T2** : ignorée")
-    if len(retry_times) >= 2:
-        schedule_lines.append(f"**T3** : {retry_times[1]:%d/%m/%Y %H:%M}")
-    else:
-        schedule_lines.append("**T3** : ignorée")
-    st.markdown(" · ".join(schedule_lines))
-    st.caption(
-        "Les heures utilisent le fuseau Africa/Casablanca. "
-        "Les horaires d'appel configurés dans l'organisation restent applicables."
-    )
-    st.caption(
-        "ℹ️ Les relances T2/T3 ne sont envoyées que pour un flow de type **Voice**. "
-        "Pour un flow Multicanale (SMS/WhatsApp), seule la tentative T1 est planifiée."
-    )
-
-    if start_at <= now_local:
-        st.info(
-            "T1 est déjà passée : la campagne démarrera immédiatement à l'activation."
-        )
-    if len(retry_times) < 2:
-        if shift_past_retries:
-            st.warning(
-                "Moins de 3 tentatives aujourd'hui : il est trop tard dans la "
-                "journée pour décaler les relances restantes avant la fin de "
-                "la campagne."
-            )
-        else:
-            st.warning(
-                "Une ou plusieurs relances sont déjà passées. Il y aura donc moins de "
-                "3 tentatives aujourd'hui."
-            )
-    if not skip_past and any(retry <= now_local for retry in retry_times):
-        st.warning(
-            "Les relances passées peuvent être refusées par l'API. "
-            "Activez « Ignorer les relances déjà passées »."
-        )
 
     # ------------------------------------------------------------------
     # Listes
     # ------------------------------------------------------------------
-    st.markdown("### 3. Listes à traiter")
+    st.markdown("### 2. Listes à traiter")
     uploaded_files = st.file_uploader(
         "Déposez les listes traitées (XLSX, XLS, CSV ou TXT AVT)",
         type=["xlsx", "xls", "csv", "txt"],
@@ -6158,6 +6106,109 @@ def app_gomobile_api_campaigns():
         seen_files.add(signature)
         unique_files.append(item)
     source_files = unique_files
+
+    # ------------------------------------------------------------------
+    # Date de traitement : détection automatique depuis les noms de fichiers
+    # ------------------------------------------------------------------
+    def _detect_date_from_filenames(files: list[dict]) -> date | None:
+        """Détecte une date DDMMYYYY ou YYYYMMDD dans les noms de fichiers."""
+        candidates: dict[date, int] = {}
+        for item in files:
+            name = str(item.get("name", ""))
+            for match in re.finditer(r"(?<!\d)(\d{8})(?!\d)", name):
+                raw = match.group(1)
+                parsed = None
+                for fmt in ("%d%m%Y", "%Y%m%d"):
+                    try:
+                        parsed = datetime.strptime(raw, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if parsed and 2000 <= parsed.year <= 2100:
+                    candidates[parsed] = candidates.get(parsed, 0) + 1
+        if not candidates:
+            return None
+        return max(candidates.items(), key=lambda kv: kv[1])[0]
+
+    detected_file_date = _detect_date_from_filenames(source_files)
+
+    if detected_file_date and detected_file_date != processing_date:
+        use_file_date = st.checkbox(
+            f"Utiliser la date des fichiers : {detected_file_date:%d/%m/%Y} "
+            f"(au lieu de {processing_date:%d/%m/%Y})",
+            value=True,
+            key=f"gomo_use_file_date_{detected_file_date:%Y%m%d}",
+            help=(
+                "Le suffixe des audiences/campagnes et la planification seront basés "
+                "sur la date détectée dans les noms des fichiers déposés."
+            ),
+        )
+        if use_file_date:
+            processing_date = detected_file_date
+            st.info(
+                f"✅ Date de traitement appliquée depuis les fichiers : "
+                f"**{processing_date:%d/%m/%Y}**"
+            )
+    elif detected_file_date:
+        st.caption(
+            f"Date détectée dans les fichiers : **{detected_file_date:%d/%m/%Y}** "
+            "(identique à la date de traitement)."
+        )
+
+    start_at, stop_at, retry_times = build_schedule(
+        processing_date,
+        first_time,
+        second_time,
+        third_time,
+        skip_past=skip_past,
+        shift_past_retries=shift_past_retries,
+    )
+    now_local = datetime.now(GOMOBILE_TIMEZONE)
+
+    st.markdown("### 3. Planification")
+    schedule_lines = [
+        f"**T1** : {start_at:%d/%m/%Y %H:%M}",
+    ]
+    if len(retry_times) >= 1:
+        schedule_lines.append(f"**T2** : {retry_times[0]:%d/%m/%Y %H:%M}")
+    else:
+        schedule_lines.append("**T2** : ignorée")
+    if len(retry_times) >= 2:
+        schedule_lines.append(f"**T3** : {retry_times[1]:%d/%m/%Y %H:%M}")
+    else:
+        schedule_lines.append("**T3** : ignorée")
+    st.markdown(" — ".join(schedule_lines))
+    st.caption(
+        f"Suffixe audience/campagne : **{processing_date:%d/%m/%Y}** — "
+        "heures en fuseau Africa/Casablanca. "
+        "Les horaires d'appel configurés dans l'organisation restent applicables."
+    )
+    st.caption(
+        "ℹ️ Les relances T2/T3 ne sont envoyées que pour un flow de type **Voice**. "
+        "Pour un flow Multicanale (SMS/WhatsApp), seule la tentative T1 est planifiée."
+    )
+
+    if start_at <= now_local:
+        st.info(
+            "T1 est déjà passée : la campagne démarrera immédiatement à l'activation."
+        )
+    if len(retry_times) < 2:
+        if shift_past_retries:
+            st.warning(
+                "Moins de 3 tentatives aujourd'hui : il est trop tard dans la "
+                "journée pour décaler les relances restantes avant la fin de "
+                "la campagne."
+            )
+        else:
+            st.warning(
+                "Une ou plusieurs relances sont déjà passées. Il y aura donc moins de "
+                "3 tentatives aujourd'hui."
+            )
+    if not skip_past and any(retry <= now_local for retry in retry_times):
+        st.warning(
+            "Les relances passées peuvent être refusées par l'API. "
+            "Activez « Ignorer les relances déjà passées »."
+        )
 
     def _suggest_flow_label(audience_name: str, labels: list[str]) -> str:
         """Propose le flow le plus proche du nom d'audience (ex: ACTIVATION)."""

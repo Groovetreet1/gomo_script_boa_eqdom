@@ -3091,6 +3091,177 @@ def est_police_scientifique_ou_vide(val):
         return True
     return False
 
+def classifier_motif_rma(detail: str | None) -> str:
+    """Ramène un motif de rejet RMA à une catégorie du reporting mensuel."""
+    t = str(detail or "").lower()
+
+    def _contient(*mots: str) -> bool:
+        return any(mot in t for mot in mots)
+
+    # Règles spécifiques d'abord (le plus informatif gagne)
+    if _contient("erreur lecture", "corrompu", "format de fichier non reconnu", "illisible", "ole"):
+        return "Erreur de lecture / format fichier"
+    if _contient("doublon", "duplicate"):
+        return "Doublon"
+    if _contient("génération", "generation", "code base", "code_base", "à régénérer", "a regenerer"):
+        return "Génération N° police impossible"
+    if _contient("template", "modèle", "gabarit"):
+        return "Template non respecté"
+    if _contient("date", "échéance", "echeance") and _contient(
+        "format", "invalide", "illisible", "incorrect", "manquant",
+        "non conforme", "convertir", "parse", "naive",
+    ):
+        return "Format de date non conforme"
+    if _contient("colonne", "entête", "entete", "header", "champ") and _contient(
+        "non trouv", "manqu", "vide", "absent", "introuvable", "introuv"
+    ):
+        return "Colonne / entête manquante"
+    if _contient("téléphone", "telephone", "tel ", "phone"):
+        return "Téléphone invalide"
+    if _contient("agence", "mapping", "référenc", "reference", "non reconnu"):
+        return "Agence / code non reconnu"
+    police = "police" in t
+    if police and _contient(
+        "scientifique", "e+", "format", "vide", "manquant", "absent",
+        "invalide", "non trouv", "détection impossible", "non référenc",
+    ):
+        return "N° police invalide / manquant"
+    if police:
+        return "Problème N° police"
+    return "Autre / à vérifier"
+
+
+def construire_rapport_apres_traitement(
+    fichiers_info: list[dict], resultats: list[dict], maintenant: datetime
+) -> list[dict]:
+    """Construit le rapport après traitement : une ligne par fichier déposé.
+
+    Les fichiers sans sortie (rejetés, ignorés ou silencieusement sautés)
+    apparaissent avec un motif classé, y compris lorsqu'ils n'ont pas de
+    ligne dans le résumé `resultats`.
+    """
+    par_source = {str(r.get("Source", "")): r for r in resultats}
+    mois = maintenant.strftime("%m/%Y")
+    horodatage = maintenant.strftime("%d/%m/%Y %H:%M")
+    rapport: list[dict] = []
+
+    for f in fichiers_info:
+        nom_fichier = str(f.get("nom_fichier", ""))
+        resultat = par_source.get(nom_fichier, {})
+        statut_brut = str(resultat.get("Statut", "") or "")
+        sortie = str(resultat.get("Sortie", "") or "")
+        reussi = bool(sortie) and sortie != "-" and statut_brut.startswith("✅")
+
+        if reussi:
+            statut = "OK"
+            motif = "—"
+            detail = ""
+        else:
+            detail = str(f.get("raison_echec") or "").strip()
+            if not detail and statut_brut:
+                detail = statut_brut.replace("❌", "").strip()
+            if not detail:
+                if f.get("df") is None:
+                    detail = "Fichier illisible"
+                elif not f.get("nom_agence"):
+                    detail = "Agence non détectée et non renseignée manuellement"
+                elif f.get("nb_a_regenerer", 0) > 0 and not f.get("code_base_effectif"):
+                    detail = (
+                        f"Code base Intermédiaire manquant "
+                        f"({f.get('nb_a_regenerer')} N° police à régénérer)"
+                    )
+                else:
+                    detail = "Fichier déposé sans sortie (non traité)"
+            statut = "REJET" if statut_brut else "SANS SORTIE"
+            motif = classifier_motif_rma(detail)
+
+        rapport.append({
+            "Mois": mois,
+            "Fichier": nom_fichier,
+            "Agence": str(f.get("nom_agence") or "-"),
+            "Statut": statut,
+            "Motif": motif,
+            "Détail": detail[:300],
+            "Sortie": sortie or "-",
+            "Date traitement": horodatage,
+        })
+
+    return rapport
+
+
+def to_excel_bytes_rapport_rma(df_rapport: pd.DataFrame) -> bytes:
+    """Export Excel du rapport après traitement (reporting mensuel RMA)."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_rapport.to_excel(writer, index=False, sheet_name="Rapport")
+        feuille = writer.sheets["Rapport"]
+        titre = writer.book.add_format({
+            "bold": True, "bg_color": "#D9E1F2", "border": 1
+        })
+        for col_idx, colonne in enumerate(df_rapport.columns):
+            feuille.write(0, col_idx, colonne, titre)
+            try:
+                longueur = int(df_rapport[colonne].astype(str).str.len().max())
+            except (ValueError, TypeError):
+                longueur = 12
+            feuille.set_column(col_idx, col_idx, max(12, min(48, longueur + 2)))
+        feuille.freeze_panes(1, 0)
+        if len(df_rapport):
+            feuille.autofilter(
+                0, 0, len(df_rapport), max(len(df_rapport.columns) - 1, 0)
+            )
+    return output.getvalue()
+
+
+def afficher_rapport_apres_traitement(
+    rapport_rows: list[dict], prefixe: str, titre: str = "Rapport après traitement"
+) -> None:
+    """Affiche le rapport, le récap par motif et les boutons d'export."""
+    st.markdown(f"**{titre}**")
+    if not rapport_rows:
+        st.info("Aucun fichier à rapporter pour cette période.")
+        return
+
+    df_rapport = pd.DataFrame(rapport_rows)
+    en_echec = df_rapport[df_rapport["Statut"] != "OK"]
+    if len(en_echec):
+        st.warning(
+            f"⚠️ **{len(en_echec)}** fichier(s) sans sortie sur "
+            f"**{len(df_rapport)}** déposé(s) — motifs ci-dessous."
+        )
+    else:
+        st.success(f"✅ Tous les fichiers ({len(df_rapport)}) ont produit une sortie.")
+
+    st.dataframe(df_rapport, use_container_width=True, hide_index=True)
+
+    if len(en_echec):
+        st.markdown("**Récapitulatif par motif :**")
+        comptage = en_echec.groupby("Motif").size().sort_values(ascending=False)
+        for motif, nombre in comptage.items():
+            st.write(f"• {motif} : {nombre}")
+
+    mois_fichier = str(rapport_rows[0].get("Mois", "")).replace("/", "")
+    col_xlsx, col_csv = st.columns(2)
+    with col_xlsx:
+        st.download_button(
+            "📥 Rapport Excel",
+            data=to_excel_bytes_rapport_rma(df_rapport),
+            file_name=f"RMA_Rapport_{mois_fichier}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"{prefixe}_xlsx",
+        )
+    with col_csv:
+        st.download_button(
+            "📥 Rapport CSV",
+            data=df_rapport.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"RMA_Rapport_{mois_fichier}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key=f"{prefixe}_csv",
+        )
+
+
 def app_traitement_agence():
     format_agence = st.radio(
         "Format de sortie :",
@@ -3860,6 +4031,7 @@ def app_traitement_agence():
             for f in fichiers_valides:
                 if f.get('nb_a_regenerer', 0) > 0 and not f.get('code_base_effectif'):
                     st.info(f"📄 {f['nom_fichier']} : {f.get('nb_a_regenerer', 0)} N° scientifiques → saisissez le Code base Intermédiaire (ex: 5863) ci-dessus")
+        _rapport_affiche = False
         if st.button("Lancer le traitement", type="primary", disabled=not tous_prets or not fichiers_valides, use_container_width=True, key="agence_lancer"):
             fichiers_traites = []
             resultats = []
@@ -3903,6 +4075,28 @@ def app_traitement_agence():
             st.markdown("---")
             st.subheader("📊 Résumé")
             st.dataframe(pd.DataFrame(resultats), use_container_width=True, hide_index=True)
+
+            # === Rapport après traitement (reporting mensuel) ===
+            _maintenant_rapport = datetime.now()
+            _mois_rapport = _maintenant_rapport.strftime("%m/%Y")
+            st.session_state["rma_last_resultats"] = resultats
+            rapport_rows = construire_rapport_apres_traitement(
+                fichiers_info, resultats, _maintenant_rapport
+            )
+            _historique_rapports = st.session_state.get("rma_rapports_mensuels", {})
+            _historique_rapports[_mois_rapport] = (
+                _historique_rapports.get(_mois_rapport, []) + rapport_rows
+            )
+            st.session_state["rma_rapports_mensuels"] = _historique_rapports
+            st.markdown("---")
+            st.subheader("📋 Rapport après traitement (reporting mensuel)")
+            afficher_rapport_apres_traitement(
+                rapport_rows,
+                "rma_rapport_en_cours",
+                titre=f"Rapport après traitement — {_mois_rapport}",
+            )
+            _rapport_affiche = True
+
             if fichiers_traites:
                 st.markdown("---")
                 st.subheader("💾 Téléchargement")
@@ -3939,6 +4133,36 @@ def app_traitement_agence():
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key=f"agence_dl_{i}"
                         )
+        if not _rapport_affiche:
+            _rapport_courant = construire_rapport_apres_traitement(
+                fichiers_info,
+                st.session_state.get("rma_last_resultats", []),
+                datetime.now(),
+            )
+            if _rapport_courant:
+                with st.expander("📋 Rapport après traitement — fichiers déposés", expanded=False):
+                    st.caption(
+                        "Fichiers déposés sans sortie enregistrée. Le rapport se "
+                        "met à jour après un clic sur « Lancer le traitement »."
+                    )
+                    afficher_rapport_apres_traitement(
+                        _rapport_courant,
+                        "rma_rapport_courant",
+                        titre="Rapport après traitement — fichiers déposés",
+                    )
+            _historique = st.session_state.get("rma_rapports_mensuels", {})
+            if _historique:
+                with st.expander("🗓️ Rapport mensuel — historique des traitements", expanded=False):
+                    _mois_choisi = st.selectbox(
+                        "Mois à afficher",
+                        options=list(_historique.keys()),
+                        key="rma_rapport_mois_historique",
+                    )
+                    afficher_rapport_apres_traitement(
+                        _historique[_mois_choisi],
+                        "rma_rapport_historique",
+                        titre=f"Rapport après traitement — {_mois_choisi}",
+                    )
     # =========================
     # GESTION MAPPING AGENCES - Recherche / Ajout / Import / Suppression
     # =========================

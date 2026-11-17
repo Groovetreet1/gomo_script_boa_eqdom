@@ -3103,19 +3103,23 @@ def classifier_motif_rma(detail: str | None) -> str:
         return "Erreur de lecture / format fichier"
     if _contient("doublon", "duplicate"):
         return "Doublon"
-    if _contient("génération", "generation", "code base", "code_base", "à régénérer", "a regenerer"):
+    if _contient("génération impossible", "generation impossible", "code base", "code_base"):
         return "Génération N° police impossible"
-    if _contient("colonne", "entête", "entete", "header", "champ") and _contient(
-        "non trouv", "manqu", "vide", "absent", "introuvable", "introuv"
-    ):
+    if _contient("colonnes manquantes", "colonne manquante"):
+        return "Colonne / entête manquante"
+    colonne_manquante = _contient(
+        "colonne", "entête", "entete", "header", "champ"
+    ) and _contient("non trouv", "manqu", "absent", "introuvable", "introuv")
+    date_probleme = _contient("date", "échéance", "echeance") and _contient(
+        "format", "invalide", "illisible", "incorrect", "non conforme",
+        "convertir", "parse", "vide",
+    )
+    if date_probleme:
+        return "Format de date non conforme"
+    if colonne_manquante:
         return "Colonne / entête manquante"
     if _contient("template", "modèle", "gabarit"):
         return "Template non respecté"
-    if _contient("date", "échéance", "echeance") and _contient(
-        "format", "invalide", "illisible", "incorrect", "manquant",
-        "non conforme", "convertir", "parse", "naive",
-    ):
-        return "Format de date non conforme"
     if _contient("téléphone", "telephone", "tel ", "phone"):
         return "Téléphone invalide"
     if _contient("agence", "mapping", "référenc", "reference", "non reconnu"):
@@ -3165,6 +3169,52 @@ def detecter_colonnes_manquantes_template_rma(df) -> list[str]:
         return []
 
 
+def analyser_qualite_valeurs_rma(df, format_date: str = "FR") -> dict:
+    """Détecte les valeurs problématiques dans un fichier RMA source.
+
+    - N° police en format scientifique (ex: 6,6687E+14), vide ou invalide
+    - Dates Effet / Echeance illisibles selon le format détecté
+    """
+    resultat = {
+        "police_invalides": 0,
+        "police_total": 0,
+        "dates_invalides": 0,
+        "dates_total": 0,
+    }
+    if df is None:
+        return resultat
+    try:
+        col_police = trouver_colonne_police_agence(df)
+        if col_police is not None:
+            for val in df[col_police].dropna():
+                chaine = str(val).strip()
+                invalide = (
+                    not chaine
+                    or chaine.upper() in ("NA", "NAN", "NONE")
+                    or "E+" in chaine.upper()
+                    or bool(re.search(r"\d[,\.]\d+\s*[Ee]\s*\d+", chaine))
+                    or len(re.findall(r"\d", chaine)) < 4
+                )
+                resultat["police_total"] += 1
+                if invalide:
+                    resultat["police_invalides"] += 1
+
+        for col in df.columns:
+            cle = nettoyer_colonne_agence(col)
+            if cle not in ("date effet", "date echeance", "dateeffet", "dateecheance", "echeance"):
+                continue
+            for val in df[col].dropna():
+                resultat["dates_total"] += 1
+                try:
+                    if convertir_date_agence(val, format_date) is None:
+                        resultat["dates_invalides"] += 1
+                except Exception:
+                    resultat["dates_invalides"] += 1
+    except Exception:
+        pass
+    return resultat
+
+
 def construire_rapport_apres_traitement(
     fichiers_info: list[dict], resultats: list[dict], maintenant: datetime
 ) -> list[dict]:
@@ -3197,6 +3247,23 @@ def construire_rapport_apres_traitement(
                 + ", ".join(manquantes)
             )
 
+        qualite = analyser_qualite_valeurs_rma(
+            f.get("df"), f.get("format_date") or "FR"
+        )
+        if qualite["police_invalides"]:
+            avertissements.append(
+                "N° police invalides (format scientifique / vide) : "
+                f"{qualite['police_invalides']}/{qualite['police_total']} ligne(s)"
+            )
+        elif f.get("nb_a_regenerer", 0) > 0:
+            avertissements.append(
+                f"N° police à régénérer : {f['nb_a_regenerer']} ligne(s)"
+            )
+        if qualite["dates_invalides"]:
+            avertissements.append(
+                f"Dates invalides ou manquantes : {qualite['dates_invalides']} valeur(s)"
+            )
+
         if reussi:
             statut = "OK ⚠️" if avertissements else "OK"
             detail = " | ".join(avertissements)
@@ -3224,6 +3291,15 @@ def construire_rapport_apres_traitement(
                 detail += (
                     " | Colonnes manquantes pour le template final : "
                     + ", ".join(manquantes)
+                )
+            if qualite["police_invalides"] and "police" not in detail.lower():
+                detail += (
+                    " | N° police invalides (format scientifique / vide) : "
+                    f"{qualite['police_invalides']}/{qualite['police_total']} ligne(s)"
+                )
+            if qualite["dates_invalides"]:
+                detail += (
+                    f" | Dates invalides ou manquantes : {qualite['dates_invalides']} valeur(s)"
                 )
             statut = "REJET" if statut_brut else "SANS SORTIE"
             motif = classifier_motif_rma(detail)

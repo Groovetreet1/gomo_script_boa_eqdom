@@ -397,6 +397,64 @@ def build_combined_excel(processed_sheets: dict) -> bytes:
     return output.getvalue()
 
 
+def lien_zip_direct(zip_bytes: bytes, zip_name: str, hauteur: int = 100) -> None:
+    """Affiche un lien de téléchargement direct (Blob) pour un ZIP.
+
+    Plus fiable que le bouton Streamlit/PDF data URI selon les navigateurs.
+    """
+    try:
+        zip_bytes = zip_bytes or b""
+        b64 = base64.b64encode(zip_bytes).decode("ascii")
+        html = f"""
+            <div style="margin:6px 0 10px 0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;">
+              <a id="dlzipblob" href="#" download="{zip_name}"
+                 style="display:inline-block;padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;
+                        text-decoration:none;font-weight:700;font-size:15px;">
+                ⬇️ Lien ZIP direct — {zip_name}
+              </a>
+              <div style="color:#374151;font-size:12px;margin-top:6px;">
+                Taille : {len(zip_bytes)} octets. Si rien ne se passe, utilisez le bouton Streamlit juste dessous.
+              </div>
+            </div>
+            <script>
+            (function() {{
+              const donnees = "{b64}";
+              const lien = document.getElementById('dlzipblob');
+              function b64ToBlob(b64Data, contentType) {{
+                const byteChars = atob(b64Data);
+                const tailleMorceau = 1024;
+                const morceaux = [];
+                for (let offset = 0; offset < byteChars.length; offset += tailleMorceau) {{
+                  const morceau = byteChars.slice(offset, offset + tailleMorceau);
+                  const octets = new Array(morceau.length);
+                  for (let i = 0; i < morceau.length; i++) octets[i] = morceau.charCodeAt(i);
+                  morceaux.push(new Uint8Array(octets));
+                }}
+                return new Blob(morceaux, {{type: contentType}});
+              }}
+              try {{
+                const url = URL.createObjectURL(b64ToBlob(donnees, 'application/zip'));
+                lien.href = url;
+                lien.addEventListener('click', function() {{
+                  setTimeout(function() {{ URL.revokeObjectURL(url); }}, 60000);
+                }});
+              }} catch (e) {{
+                lien.removeAttribute('href');
+                lien.textContent = 'Lien direct indisponible (navigateur)';
+                lien.style.background = '#9ca3af';
+              }}
+            }})();
+            </script>
+            """
+        if hasattr(st, "iframe"):
+            st.iframe(html, height=hauteur)
+        else:
+            import streamlit.components.v1 as components
+            components.html(html, height=hauteur)
+    except Exception as exc:
+        st.warning(f"Lien direct indisponible : {exc}")
+
+
 def build_zip(processed_sheets: dict) -> bytes:
     zip_buffer = BytesIO()
     import xlsxwriter
@@ -4249,19 +4307,23 @@ def app_traitement_agence():
                         key="agence_dl_single"
                     )
                 else:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.download_button(
-                            f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers)",
-                            data=creer_zip_agence(fichiers_traites),
-                            file_name=f"RMA_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-                            mime="application/zip",
-                            type="primary",
-                            use_container_width=True,
-                            key="agence_dl_zip"
-                        )
-                    with col2:
-                        st.info("Téléchargements individuels ↓")
+                    _zip_rma = creer_zip_agence(fichiers_traites)
+                    _nom_zip_rma = f"RMA_BATCH_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+                    st.session_state["rma_last_zip"] = {
+                        "bytes": _zip_rma,
+                        "name": _nom_zip_rma,
+                    }
+                    lien_zip_direct(_zip_rma, _nom_zip_rma)
+                    st.download_button(
+                        f"📦 Télécharger ZIP ({len(fichiers_traites)} fichiers) — bouton Streamlit",
+                        data=_zip_rma,
+                        file_name=_nom_zip_rma,
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True,
+                        key="agence_dl_zip"
+                    )
+                    st.caption("Téléchargements individuels ↓")
                     for i, (nom, data) in enumerate(fichiers_traites):
                         st.download_button(
                             f"📥 {nom}",
@@ -4271,6 +4333,19 @@ def app_traitement_agence():
                             key=f"agence_dl_{i}"
                         )
         if not _rapport_affiche:
+            _zip_persistant = st.session_state.get("rma_last_zip")
+            if _zip_persistant:
+                lien_zip_direct(
+                    _zip_persistant.get("bytes", b""),
+                    _zip_persistant.get("name", "RMA_BATCH.zip"),
+                )
+                st.download_button(
+                    "📦 Télécharger le ZIP RMA (bouton Streamlit)",
+                    data=_zip_persistant.get("bytes", b""),
+                    file_name=_zip_persistant.get("name", "RMA_BATCH.zip"),
+                    mime="application/zip",
+                    key="agence_dl_zip_persistant",
+                )
             _rapport_courant = construire_rapport_apres_traitement(
                 fichiers_info,
                 st.session_state.get("rma_last_resultats", []),

@@ -3105,6 +3105,10 @@ def classifier_motif_rma(detail: str | None) -> str:
         return "Doublon"
     if _contient("génération", "generation", "code base", "code_base", "à régénérer", "a regenerer"):
         return "Génération N° police impossible"
+    if _contient("colonne", "entête", "entete", "header", "champ") and _contient(
+        "non trouv", "manqu", "vide", "absent", "introuvable", "introuv"
+    ):
+        return "Colonne / entête manquante"
     if _contient("template", "modèle", "gabarit"):
         return "Template non respecté"
     if _contient("date", "échéance", "echeance") and _contient(
@@ -3112,10 +3116,6 @@ def classifier_motif_rma(detail: str | None) -> str:
         "non conforme", "convertir", "parse", "naive",
     ):
         return "Format de date non conforme"
-    if _contient("colonne", "entête", "entete", "header", "champ") and _contient(
-        "non trouv", "manqu", "vide", "absent", "introuvable", "introuv"
-    ):
-        return "Colonne / entête manquante"
     if _contient("téléphone", "telephone", "tel ", "phone"):
         return "Téléphone invalide"
     if _contient("agence", "mapping", "référenc", "reference", "non reconnu"):
@@ -3129,6 +3129,40 @@ def classifier_motif_rma(detail: str | None) -> str:
     if police:
         return "Problème N° police"
     return "Autre / à vérifier"
+
+
+def detecter_colonnes_manquantes_template_rma(df) -> list[str]:
+    """Colonnes du template RMA final absentes du fichier source.
+
+    Les colonnes volontairement vides du modèle (Segment, Risque départ,
+    Appétence MRH) ne sont pas considérées comme manquantes.
+    """
+    if df is None:
+        return []
+    try:
+        presentes = set()
+        for col in df.columns:
+            clean = nettoyer_colonne_agence(col)
+            presentes.add(clean)
+            presentes.add(str(col).strip())
+            canon = ALIASES_COLONNES.get(clean)
+            if canon:
+                presentes.add(canon)
+        # Colonnes générées automatiquement par traiter_fichier_agence :
+        # absence dans la source n'est pas un problème signalé.
+        auto_generees = set(COLONNES_VIDES) | {
+            "Intermediaire", "Duree", "Heure Echeance", "Etat"
+        }
+        manquantes = []
+        for col in MODELE_COLONNES:
+            if col in auto_generees:
+                continue
+            if col in presentes or nettoyer_colonne_agence(col) in presentes:
+                continue
+            manquantes.append(col)
+        return manquantes
+    except Exception:
+        return []
 
 
 def construire_rapport_apres_traitement(
@@ -3152,12 +3186,26 @@ def construire_rapport_apres_traitement(
         sortie = str(resultat.get("Sortie", "") or "")
         reussi = bool(sortie) and sortie != "-" and statut_brut.startswith("✅")
 
+        manquantes = detecter_colonnes_manquantes_template_rma(f.get("df"))
+        rejet_initial = str(f.get("raison_echec") or "").strip()
+        avertissements: list[str] = []
+        if rejet_initial:
+            avertissements.append(f"Rejet initial : {rejet_initial}")
+        if manquantes:
+            avertissements.append(
+                "Colonnes manquantes pour le template final : "
+                + ", ".join(manquantes)
+            )
+
         if reussi:
-            statut = "OK"
-            motif = "—"
-            detail = ""
+            statut = "OK ⚠️" if avertissements else "OK"
+            detail = " | ".join(avertissements)
+            motif = (
+                classifier_motif_rma(" ".join(avertissements))
+                if avertissements else "—"
+            )
         else:
-            detail = str(f.get("raison_echec") or "").strip()
+            detail = rejet_initial
             if not detail and statut_brut:
                 detail = statut_brut.replace("❌", "").strip()
             if not detail:
@@ -3172,6 +3220,11 @@ def construire_rapport_apres_traitement(
                     )
                 else:
                     detail = "Fichier déposé sans sortie (non traité)"
+            if manquantes and "colonne" not in detail.lower():
+                detail += (
+                    " | Colonnes manquantes pour le template final : "
+                    + ", ".join(manquantes)
+                )
             statut = "REJET" if statut_brut else "SANS SORTIE"
             motif = classifier_motif_rma(detail)
 
@@ -3223,7 +3276,9 @@ def afficher_rapport_apres_traitement(
         return
 
     df_rapport = pd.DataFrame(rapport_rows)
-    en_echec = df_rapport[df_rapport["Statut"] != "OK"]
+    _statuts = df_rapport["Statut"].astype(str)
+    en_echec = df_rapport[~_statuts.str.startswith("OK")]
+    avec_alerte = df_rapport[_statuts.str.startswith("OK ⚠")]
     if len(en_echec):
         st.warning(
             f"⚠️ **{len(en_echec)}** fichier(s) sans sortie sur "
@@ -3231,12 +3286,18 @@ def afficher_rapport_apres_traitement(
         )
     else:
         st.success(f"✅ Tous les fichiers ({len(df_rapport)}) ont produit une sortie.")
+    if len(avec_alerte):
+        st.info(
+            f"⚠️ **{len(avec_alerte)}** fichier(s) traité(s) avec réserve "
+            "(rejet initial ou colonnes manquantes) — voir le motif."
+        )
 
     st.dataframe(df_rapport, use_container_width=True, hide_index=True)
 
-    if len(en_echec):
+    _avec_motif = df_rapport[df_rapport["Motif"].astype(str) != "—"]
+    if len(_avec_motif):
         st.markdown("**Récapitulatif par motif :**")
-        comptage = en_echec.groupby("Motif").size().sort_values(ascending=False)
+        comptage = _avec_motif.groupby("Motif").size().sort_values(ascending=False)
         for motif, nombre in comptage.items():
             st.write(f"• {motif} : {nombre}")
 

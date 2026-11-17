@@ -20,4 +20,4 @@ services:
         value: poll
       # Marqueur de version affiché dans la sidebar (README)
       - key: APP_BUILD
-        value: 2026-11-17-rma-rapport-apres-traitement
+        value: 2026-11-17-rma-rapport-motif-colonnes

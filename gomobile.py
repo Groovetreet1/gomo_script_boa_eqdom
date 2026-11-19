@@ -6551,27 +6551,52 @@ def app_gomobile_api_campaigns():
     # ------------------------------------------------------------------
     # Date des fichiers (suffixe j-1) : détection automatique
     # ------------------------------------------------------------------
+    def _extract_date_from_filename(name: str) -> date | None:
+        """Retourne la première date valide trouvée dans un nom de fichier."""
+        nom = str(name or "")
+        for match in re.finditer(r"(?<!\d)(\d{8})(?!\d)", nom):
+            raw = match.group(1)
+            for fmt in ("%d%m%Y", "%Y%m%d"):
+                try:
+                    parsed = datetime.strptime(raw, fmt).date()
+                    if 2000 <= parsed.year <= 2100:
+                        return parsed
+                except ValueError:
+                    continue
+        for match in re.finditer(r"(?<!\d)(\d{1,4})[./_-](\d{1,2})[./_-](\d{2,4})(?!\d)", nom):
+            a, b, c = match.groups()
+            tentatives = []
+            if len(c) == 4:
+                tentatives = [(int(c), int(b), int(a)), (int(c), int(a), int(b))]
+            elif len(a) == 4:
+                tentatives = [(int(a), int(b), int(c))]
+            else:
+                annee = 2000 + int(c) if int(c) < 50 else 1900 + int(c)
+                tentatives = [(annee, int(b), int(a)), (annee, int(a), int(b))]
+            for annee, mois, jour in tentatives:
+                try:
+                    parsed = date(annee, mois, jour)
+                    if 2000 <= parsed.year <= 2100:
+                        return parsed
+                except ValueError:
+                    continue
+        return None
+
     def _detect_date_from_filenames(files: list[dict]) -> date | None:
-        """Détecte une date DDMMYYYY ou YYYYMMDD dans les noms de fichiers."""
-        candidates: dict[date, int] = {}
+        """Date la plus fréquente (sert de valeur par défaut au fallback)."""
+        candidats: dict[date, int] = {}
         for item in files:
-            name = str(item.get("name", ""))
-            for match in re.finditer(r"(?<!\d)(\d{8})(?!\d)", name):
-                raw = match.group(1)
-                parsed = None
-                for fmt in ("%d%m%Y", "%Y%m%d"):
-                    try:
-                        parsed = datetime.strptime(raw, fmt).date()
-                        break
-                    except ValueError:
-                        continue
-                if parsed and 2000 <= parsed.year <= 2100:
-                    candidates[parsed] = candidates.get(parsed, 0) + 1
-        if not candidates:
+            jour = _extract_date_from_filename(item.get("name", ""))
+            if jour:
+                candidats[jour] = candidats.get(jour, 0) + 1
+        if not candidats:
             return None
-        return max(candidates.items(), key=lambda kv: kv[1])[0]
+        return max(candidats.items(), key=lambda kv: kv[1])[0]
 
     detected_file_date = _detect_date_from_filenames(source_files)
+    dates_par_fichier = [
+        _extract_date_from_filename(item.get("name", "")) for item in source_files
+    ]
 
     # ------------------------------------------------------------------
     # Deux dates distinctes :
@@ -6582,7 +6607,7 @@ def app_gomobile_api_campaigns():
     col_name_date, col_name_info = st.columns([1, 2])
     with col_name_date:
         name_date = st.date_input(
-            "Date du suffixe des noms (j-1)",
+            "Date de repli du suffixe (j-1)",
             value=default_name_date,
             format="DD/MM/YYYY",
             key=(
@@ -6591,16 +6616,16 @@ def app_gomobile_api_campaigns():
                 else "gomo_name_date_sans_fichier"
             ),
             help=(
-                "Date utilisée dans les noms des audiences et des campagnes "
-                "(NOM_LISTE JJMMAAAA). Elle reste indépendante de la date de "
-                "planification T1/T2/T3."
+                "Date de repli pour les fichiers dont le nom ne contient aucune "
+                "date. Les fichiers datés gardent leur propre date "
+                "(NOM_LISTE JJMMAAAA). Indépendant de la planification T1/T2/T3."
             ),
         )
     with col_name_info:
         if detected_file_date:
             st.caption(
-                f"Date détectée dans les fichiers : **{detected_file_date:%d/%m/%Y}** — "
-                "modifiable ci-contre si besoin."
+                f"Date la plus fréquente dans les fichiers : **{detected_file_date:%d/%m/%Y}** "
+                "(repli). Chaque fichier daté garde sa propre date."
             )
         else:
             st.caption(
@@ -6612,10 +6637,26 @@ def app_gomobile_api_campaigns():
         st.error("Choisissez la date du suffixe des noms.")
         return
 
-    st.info(
-        f"Suffixe des noms : **{name_date:%d/%m/%Y}** — "
-        f"planification : **{schedule_date:%d/%m/%Y}**."
-    )
+    dates_effectives = [
+        (jour or name_date) for jour in dates_par_fichier
+    ] or [name_date]
+    dates_uniques = sorted(set(dates_effectives))
+    dates_texte = " / ".join(f"{jour:%d/%m/%Y}" for jour in dates_uniques)
+    dates_signature = hashlib.md5(
+        "|".join(jour.strftime("%Y%m%d") for jour in dates_uniques).encode("utf-8")
+    ).hexdigest()[:8]
+
+    if len(dates_uniques) > 1:
+        st.info(
+            f"📅 **{len(dates_uniques)} dates détectées** dans les fichiers : "
+            f"**{dates_texte}**. Chaque liste garde sa propre date dans son nom "
+            f"(audience et campagne). Planification unique : **{schedule_date:%d/%m/%Y}**."
+        )
+    else:
+        st.info(
+            f"Suffixe des noms : **{dates_texte}** — "
+            f"planification : **{schedule_date:%d/%m/%Y}**."
+        )
 
     start_at, stop_at, retry_times = build_schedule(
         schedule_date,
@@ -6641,7 +6682,7 @@ def app_gomobile_api_campaigns():
         schedule_lines.append("**T3** : ignorée")
     st.markdown(" — ".join(schedule_lines))
     st.caption(
-        f"Suffixe audience/campagne : **{name_date:%d/%m/%Y}** — "
+        f"Suffixe audience/campagne : **{dates_texte}** — "
         f"planification : **{schedule_date:%d/%m/%Y}** — "
         "heures en fuseau Africa/Casablanca. "
         "Les horaires d'appel configurés dans l'organisation restent applicables."
@@ -6727,16 +6768,22 @@ def app_gomobile_api_campaigns():
         file_infos.append({**item, "headers": headers})
 
     editor_rows = []
-    for info in file_infos:
+    for position, info in enumerate(file_infos):
         default_phone = (
             find_phone_column(info["headers"], phone_column_default)
             or (info["headers"][0] if info["headers"] else phone_column_default)
         )
-        audience_name = audience_name_for_file(info["name"], name_date)
+        date_fichier = (
+            dates_par_fichier[position]
+            if position < len(dates_par_fichier)
+            else None
+        ) or name_date
+        audience_name = audience_name_for_file(info["name"], date_fichier)
         editor_rows.append(
             {
                 "Inclure": True,
                 "Fichier": info["name"],
+                "Date suffixe": date_fichier,
                 "Audience": audience_name,
                 "Téléphone": default_phone,
                 "Flow": _suggest_flow_label(audience_name, flow_labels),
@@ -6766,7 +6813,7 @@ def app_gomobile_api_campaigns():
         "|".join(sorted(flow_labels)).encode("utf-8")
     ).hexdigest()[:8]
     editor_key = (
-        f"gomo_lists_editor_v2_{name_date:%Y%m%d}_"
+        f"gomo_lists_editor_v3_{dates_signature}_"
         f"{phone_signature}_{files_signature}_{flows_signature}"
     )
 
@@ -6781,10 +6828,13 @@ def app_gomobile_api_campaigns():
         hide_index=True,
         use_container_width=True,
         num_rows="fixed",
-        disabled=["Fichier"],
+        disabled=["Fichier", "Date suffixe"],
         column_config={
             "Inclure": st.column_config.CheckboxColumn("Inclure", default=True),
             "Fichier": st.column_config.TextColumn("Fichier"),
+            "Date suffixe": st.column_config.DateColumn(
+                "Date suffixe", format="DD/MM/YYYY"
+            ),
             "Audience": st.column_config.TextColumn(
                 "Nom de l'audience",
                 required=True,
@@ -6829,7 +6879,16 @@ def app_gomobile_api_campaigns():
                 "Rechargez les flows et vérifiez la sélection."
             )
             continue
-        selected_rows.append((info, audience_name, phone_column, selected_flow_row))
+        row_date = row.get("Date suffixe")
+        if not isinstance(row_date, date):
+            row_date = (
+                dates_par_fichier[int(index)]
+                if int(index) < len(dates_par_fichier)
+                else None
+            ) or name_date
+        selected_rows.append(
+            (info, audience_name, phone_column, selected_flow_row, row_date)
+        )
 
     if validation_errors:
         for error in validation_errors:
@@ -6849,7 +6908,7 @@ def app_gomobile_api_campaigns():
 
     voice_rows = [
         (audience_name, flow_label(row_flow))
-        for _, audience_name, _, row_flow in selected_rows
+        for _, audience_name, _, row_flow, _ in selected_rows
         if str(row_flow.get("channelType", "") or "") == "call"
     ]
     if voice_rows and not selected_did_ids:
@@ -6871,7 +6930,7 @@ def app_gomobile_api_campaigns():
     selection_signature = hashlib.md5(
         "|".join(
             f"{name}|{flow_label(flow_obj)}"
-            for _, name, _, flow_obj in selected_rows
+            for _, name, _, _, flow_obj in selected_rows
         ).encode("utf-8")
     ).hexdigest()[:10]
     if st.button(
@@ -6882,7 +6941,7 @@ def app_gomobile_api_campaigns():
     ):
         duplicate_rows = []
         with st.spinner("Recherche des doublons dans GoMobile..."):
-            for _, audience_name, _, _ in selected_rows:
+            for _, audience_name, _, _, _ in selected_rows:
                 try:
                     audiences = api.find_audiences_by_name(audience_name)
                     campaigns = api.find_campaigns_by_name(audience_name)
@@ -6961,15 +7020,16 @@ def app_gomobile_api_campaigns():
         status_box = st.status("Automatisation en cours...", expanded=True)
 
         with status_box:
-            for position, (info, audience_name, phone_column, row_flow) in enumerate(
-                selected_rows, start=1
-            ):
+            for position, (
+                info, audience_name, phone_column, row_flow, row_date
+            ) in enumerate(selected_rows, start=1):
                 progress.progress(
                     (position - 1) / max(len(selected_rows), 1),
                     text=f"{audience_name} ({position}/{len(selected_rows)})",
                 )
                 result = {
                     "Liste": info["name"],
+                    "Date suffixe": row_date.strftime("%d/%m/%Y"),
                     "Audience": audience_name,
                     "Flow": flow_label(row_flow),
                     "Audience ID": "",
@@ -7042,7 +7102,7 @@ def app_gomobile_api_campaigns():
                             audience_name,
                             description=(
                                 "Audience BOA Marketing — traitement du "
-                                f"{name_date:%d/%m/%Y}"
+                                f"{row_date:%d/%m/%Y}"
                             ),
                         )
                         audience_id = str(audience.get("id", ""))
@@ -7204,7 +7264,7 @@ def app_gomobile_api_campaigns():
                                 name=audience_name,
                                 description=(
                                     "Créée automatiquement par BOA Marketing — "
-                                    f"traitement du {name_date:%d/%m/%Y}"
+                                    f"traitement du {row_date:%d/%m/%Y}"
                                 ),
                                 flow=row_flow,
                                 audience_id=audience_id,
@@ -7271,7 +7331,7 @@ def app_gomobile_api_campaigns():
             status_box.update(label="Automatisation terminée", state="complete")
 
         st.session_state["gomo_last_results"] = {
-            "date": f"{name_date:%d/%m/%Y}",
+            "date": dates_texte,
             "schedule_date": f"{schedule_date:%d/%m/%Y}",
             "rows": results,
         }

@@ -683,6 +683,16 @@ def app_avt_to_apt():
     )
 
     if uploaded_files:
+        # Ignorer totalement et silencieusement les fichiers REPORT :
+        # seul le SVI (fichiers AVT) est traité, aucun message affiché.
+        uploaded_files = [
+            fichier for fichier in uploaded_files
+            if "OUT_REPORT" not in str(fichier.name or "").upper()
+            and "_REPORT_" not in str(fichier.name or "").upper()
+        ]
+        if not uploaded_files:
+            return
+
         zip_ok = io.BytesIO()
         zip_bad = io.BytesIO()
         processed_for_api = []
@@ -6503,6 +6513,10 @@ def app_gomobile_api_campaigns():
 
     source_files: list[dict] = []
     for uploaded in uploaded_files or []:
+        # REPORT ignoré totalement et silencieusement : seul le SVI est traité.
+        nom_upl = str(uploaded.name or "").upper()
+        if "OUT_REPORT" in nom_upl or "_REPORT_" in nom_upl:
+            continue
         source_files.append(
             {
                 "name": uploaded.name,

@@ -6930,7 +6930,7 @@ def app_gomobile_api_campaigns():
     selection_signature = hashlib.md5(
         "|".join(
             f"{name}|{flow_label(flow_obj)}"
-            for _, name, _, _, flow_obj in selected_rows
+            for _, name, _, flow_obj, _ in selected_rows
         ).encode("utf-8")
     ).hexdigest()[:10]
     if st.button(

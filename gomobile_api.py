@@ -248,14 +248,15 @@ def clean_list_base_name(filename: str) -> str:
 def canonical_list_name(base_name: str) -> str:
     """Ramène les variantes connues vers les 5 noms BOA officiels."""
     key = normalize_key(base_name)
+    compact = key.replace(" ", "")
     if "ACTIVATION" in key:
         return "ACTIVATION"
+    if "CARTE" in key and "ACTIVE" in key and ("NON" in key or "NACTIVE" in compact):
+        return "CARTE NON ACTIVE"
+    if "CARTE" in key and "REMISE" in key and ("NON" in key or "NREMISE" in compact):
+        return "CARTE NON REMISE"
     if "ATTRITION" in key or "ATTRIBUTION" in key:
         return "ATTRITIONS"
-    if "CARTE" in key and "NON" in key and "ACTIVE" in key:
-        return "CARTE NON ACTIVE"
-    if "CARTE" in key and "NON" in key and "REMISE" in key:
-        return "CARTE NON REMISE"
     if "WELCOME" in key:
         return "WELCOME"
     return str(base_name or "").strip().upper()
